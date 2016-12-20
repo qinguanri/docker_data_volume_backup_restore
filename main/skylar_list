@@ -1,0 +1,56 @@
+#!/bin/bash
+#########################
+#  author: Qin Guanri
+#  date  : 2016-12-14
+#########################
+
+VERSION="1.0.0"
+BACKUP_BASE_DIR="/backup/container_main"
+
+usage() {
+    echo "
+usage:
+
+docker exec -it main bash list [options]
+
+the most commonly options are:
+-V                  show version.
+-h                  show this usage.
+
+example:
+docker exec -it main bash list
+"
+    exit 0
+}
+
+
+main() {
+    printf "%5s %10s %4s %2s %4s %20s\n" "index" "size" "create" "date" "time" "directory"
+    if [ ! -d $BACKUP_BASE_DIR ]; then
+        exit 0
+    fi
+
+    cd $BACKUP_BASE_DIR
+    ls -lt | sed '1d' | awk '{printf("%5d %10s %4s %2s %4s /backup/container_main/%s\n", NR, $5, $6, $7, $8, $9)}'
+}
+
+
+args=`getopt "d:r:hV" $*`
+if [ $? -ne 0 ]
+then
+    usage
+fi
+
+set -- $args
+for i in $*
+do
+    case "$i" in
+    -h) usage;;
+    -V) echo "version $VERSION"; exit 0;;
+    -\?) usage;;
+    --) shift; break;;
+    esac
+done
+
+#### main
+main

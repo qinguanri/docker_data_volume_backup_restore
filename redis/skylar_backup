@@ -1,0 +1,152 @@
+#!/bin/bash
+#########################
+#  author: Qin Guanri
+#  date  : 2016-12-14
+#########################
+
+VERSION="1.0.0"
+BACKUP_BASE_DIR="/backup/container_redis"
+BACKUPDIR=""
+DIRRECTORY=""                       # the relative directory path of backup files. 
+RESERVE_SIZE=5                      # reserve space size GB
+
+REDIS_AOF_FILE="/var/lib/redis/appendonly.aof"
+
+REDIS_CLI=`which redis-cli`
+
+usage() {
+    echo "
+usage:
+
+docker exec -it redis bash backup [options]
+
+the most commonly options are:
+-d  directory       the relative directory path of backup files. 
+                    default is the timestamp. e.g: -d 20161201000000
+
+-r  reservespace    the reserve space size (unit GBytes). Backup will return error
+                    if there is not enough reserve space. default is 5GB. e.g: -r 10
+
+-V                  show version.
+-h                  show this usage.
+
+example:
+docker exec -it redis bash backup
+"
+    exit 0
+}
+
+## we will create a directory specified by argument '-d'.
+## if '-d' is empty, we will create a default directory named by timestamp. 
+create_backup_dir() {
+    echo "==> create backup directory ..."
+
+    if [ "$DIRRECTORY" == "" ]; then
+        DIRRECTORY=`date "+%Y%m%d%H%M%S"`
+    fi
+
+    BACKUPDIR="$BACKUP_BASE_DIR/$DIRRECTORY"
+
+    if [ -d $BACKUPDIR ]; then
+        echo "ERROR. $BACKUPDIR is already exsit."
+        exit 1
+    fi
+
+    mkdir -p $BACKUPDIR
+}
+
+
+## check_space $need_size. unit Bytes. 
+## return 0 if free space is enough, else return 1.
+check_space() {
+    echo "==> check space ..."
+
+    need_size=0
+    if [ "$1" != "" ]; then
+        need_size=$1
+    fi
+
+    cd /
+    total_free_size=`df | grep '/dev/mapper/docker' | awk '{print $4}'`
+    let total_free_size=$total_free_size*1024
+    let free_size=$total_free_size-$need_size
+    let reserve_bytes=$RESERVE_SIZE*1024*1024
+
+    let total_free_size_MB=$total_free_size/1024/1024
+    let need_size_MB=$need_size/1024/1024
+    let free_size_MB=$free_size/1024/1024
+    let reserve_size_MB=$reserve_bytes/1024/1024
+
+    echo "==> compute space size ..."
+    echo "total_free_size=$total_free_size_MB MBytes."
+    echo "need_size=$need_size_MB MBytes."
+    echo "free_size=$free_size_MB MBytes."
+    echo "reserve_size=$reserve_size_MB MBytes."
+
+    if [ $free_size -lt $reserve_bytes ]; then
+        return 1
+    fi
+
+    return 0
+}
+
+backup_aof() {
+    echo "==> start to backup aof ..."
+
+    if [ ! -e $REDIS_AOF_FILE ]; then
+        echo "WARN. $REDIS_AOF_FILE is not exsit yet. I will create it by cmd: $REDIS_CLI bgrewriteaof."
+        $REDIS_CLI bgrewriteaof
+    fi
+
+    if [ ! -e $REDIS_AOF_FILE ]; then
+        echo "ERROR. cannot find $REDIS_AOF_FILE."
+        return 1
+    fi
+
+    aof_size=`ls -l $REDIS_AOF_FILE | awk '{print $5}'`
+    check_space $aof_size
+    if [ $? -ne 0 ]; then
+        echo "ERROR. There is not enough reserve space to backup $REDIS_AOF_FILE. Reserve size is $RESERVE_SIZE GB."
+        return 1
+    fi
+
+    create_backup_dir
+
+    cp $REDIS_AOF_FILE $BACKUPDIR
+
+    return 0
+}
+
+main() {
+    backup_aof
+
+    if [ $? -eq 0 ]; then
+        echo "Done."
+        exit 0
+    else
+        echo "Failed."
+        exit 1
+    fi
+}
+
+args=`getopt "d:r:hV" $*`
+if [ $? -ne 0 ]
+then
+    usage
+fi
+
+set -- $args
+for i in $*
+do
+    case "$i" in
+    -d) DIRRECTORY=$2; shift 2;;
+    -r) RESERVE_SIZE=$2; shift 2;;
+    -h) usage;;
+    -V) echo "version $VERSION"; exit 0;;
+    -\?) usage;;
+    --) shift; break;;
+    esac
+done
+
+#### main
+main

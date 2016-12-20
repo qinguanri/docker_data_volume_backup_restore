@@ -1,0 +1,174 @@
+#!/bin/bash
+#########################
+#  author: Qin Guanri
+#  date  : 2016-12-14
+#########################
+
+VERSION="1.0.0"
+BACKUP_BASE_DIR="/backup/container_redis"
+DIRRECTORY=""                       # the relative directory path of backup files. 
+RESERVE_SIZE=5                      # reserve space size, unit GB
+INDEX=""
+
+REDIS_AOF_FILE="/var/lib/redis/appendonly.aof"
+REDIS_AOF_FILE_OLD="/var/lib/redis/appendonly.aof.old"
+
+BACKUP_FILE=""
+
+REDIS_CLI=`which redis-cli`
+
+usage() {
+    echo "
+usage:
+
+docker exec -it redis bash restore [options]
+
+the most commonly options are:
+-i  index       restore with a directory by index. 
+                default is by index, and index=1. e.g: -i 2
+
+-d  directory   restore by a specify directory. Notice that It will use 
+                index if '-i' is not empty. e.g: -d uuid_1234567890
+
+-h              show this usage.     
+
+example:
+docker exec -it redis bash restore
+"
+    exit 0
+}
+
+
+## check_space $need_size. return 0 or 1
+check_space() {
+    need_size=0
+    if [ "$1" != "" ] && [ "$1" -gt 0 ]; then
+        need_size=$1
+    else
+        echo "ERROR. get an invalid aof file size."
+        return 1
+    fi
+
+    cd /
+    total_free_size=`df | grep '/dev/mapper/docker' | awk '{print $4}'`
+    let total_free_size=$total_free_size*1024
+    let free_size=$total_free_size-$need_size
+    let reserve_bytes=$RESERVE_SIZE*1024*1024
+
+    let total_free_size_MB=$total_free_size/1024/1024
+    let need_size_MB=$need_size/1024/1024
+    let free_size_MB=$free_size/1024/1024
+    let reserve_size_MB=$reserve_bytes/1024/1024
+
+    echo "==> compute space size ..."
+    echo "total_free_size=$total_free_size_MB MBytes."
+    echo "need_size=$need_size_MB MBytes."
+    echo "free_size=$free_size_MB MBytes."
+    echo "reserve_size=$reserve_size_MB MBytes."
+
+    if [ $free_size -lt $reserve_bytes ]; then
+        return 1
+    fi
+
+    return 0
+}
+
+
+restore_aof() {
+    echo "==> start to restore redis ..."
+
+    ## try to use index at first.
+    if [ "$INDEX" != "" ] && [ "$INDEX" -gt 0 ]; then
+        DIRRECTORY=`ls -lt | sed '1d' | sed -n "$INDEXp" | awk '{print $9}'`
+        if [ "$DIRRECTORY" == "" ]; then
+            echo "ERROR. get an invalid index:$INDEX."
+            return 1
+        fi
+    fi
+
+    if [ "$DIRRECTORY" == "" ] && [ "$INDEX" == "" ]; then
+        if [ ! -d $BACKUP_BASE_DIR ]; then
+            echo "ERROR. cannot find directory $BACKUP_BASE_DIR."
+            return 1
+        fi
+        cd $BACKUP_BASE_DIR
+        DIRRECTORY=`ls -lt | sed '1d' | head -1 | awk '{print $9}'`
+        if [ "$DIRRECTORY" == "" ]; then
+            echo "ERROR. Backup directory is empty."
+            return 1
+        fi
+    fi
+
+    BACKUP_FILE="$BACKUP_BASE_DIR/$DIRRECTORY/appendonly.aof"
+    if [ ! -e $BACKUP_FILE ]; then
+        echo "ERROR. cannot find backup file: $BACKUP_FILE"
+        return 1
+    fi
+
+    echo "==> $BACKUP_FILE will be used to restore ..."
+
+    aof_size=`ls -l $BACKUP_FILE | awk '{print $5}'`
+    check_space $aof_size
+    if [ $? -ne 0 ]; then
+        echo "ERROR. There is not enough reserve space to restore. reserve size is $RESERVE_SIZE GB."
+        return 1
+    fi
+
+    cp $REDIS_AOF_FILE $REDIS_AOF_FILE_OLD
+
+    echo "==> supervisorctl stop redis ..."
+    supervisorctl stop redis
+    kill -9 $(ps -ef | grep redis-server | grep 6379 | awk '{print $2}')
+
+    echo "==> copy $BACKUP_FILE to $REDIS_AOF_FILE ..."
+    cp $BACKUP_FILE $REDIS_AOF_FILE
+
+    echo "==> supervisorctl start redis ..."
+    supervisorctl start redis
+
+    if [ $? -ne 0 ]; then
+        echo "ERROR. supervisorctl start redis failed. rollback and restart redis ..."
+        mv $REDIS_AOF_FILE_OLD $REDIS_AOF_FILE
+        supervisorctl restart redis
+        return 1
+    fi
+
+    rm -f $REDIS_AOF_FILE_OLD
+    return 0
+}
+
+
+main() {
+    restore_aof
+
+    if [ $? -eq 0 ]; then
+        echo "Done."
+        exit 0
+    else
+        echo "Failed."
+        exit 1
+    fi
+}
+
+
+args=`getopt "i:d:hV" $*`
+if [ $? -ne 0 ]
+then
+    usage
+fi
+
+set -- $args
+for i in $*
+do
+    case "$i" in
+    -i) INDEX=$2; shift 2;;
+    -d) DIRRECTORY=$2; shift 2;;
+    -h) usage;;
+    -V) echo "version $VERSION"; exit 0;;
+    -\?) usage;;
+    --) shift; break;;
+    esac
+done
+
+#### main
+main

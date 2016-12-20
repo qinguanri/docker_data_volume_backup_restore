@@ -1,0 +1,152 @@
+#!/bin/bash
+#########################
+#  author: Qin Guanri
+#  date  : 2016-12-14
+#########################
+
+VERSION="1.0.0"
+BACKUP_BASE_DIR="/backup/container_pg"
+BACKUPDIR=""
+DIRRECTORY=""                       # the relative directory path of backup files. 
+RESERVE_SIZE=5                      # reserve space size GB
+
+PG_DUMP_FILE="/var/lib/postgresql/dump.sql"
+
+
+usage() {
+    echo "
+Backup pg data without stopping service.
+
+usage:
+
+docker exec -it pg bash backup [options]
+
+the most commonly options are:
+-d  directory       the relative directory path of backup files. 
+                    default is the timestamp. e.g: -d 20161201000000
+
+-r  reservespace    the reserve space size (unit GBytes). Backup will return error
+                    if there is not enough reserve space. default is 5GB. e.g: -r 10
+
+-V                  show version.
+-h                  show this usage.
+
+example:
+docker exec -it pg bash backup
+"
+    exit 0
+}
+
+
+create_backup_dir() {
+    if [ "$DIRRECTORY" == "" ]; then
+        DIRRECTORY=`date "+%Y%m%d%H%M%S"`
+    fi
+
+    BACKUPDIR="$BACKUP_BASE_DIR/$DIRRECTORY"
+
+    if [ -d $BACKUPDIR ]; then
+        echo "ERROR. $BACKUPDIR is already exsit."
+        exit 1
+    fi
+
+    mkdir -p $BACKUPDIR
+    chmod -R 777 $BACKUPDIR
+}
+
+
+## check_space $need_size. unit Bytes. return 0 or 1
+check_space() {
+    echo "==> check space ..."
+
+    need_size=0
+    if [ "$1" != "" ]; then
+        need_size=$1
+    fi
+
+    cd /
+    total_free_size=`df | grep '/dev/mapper/docker' | awk '{print $4}'`
+    let total_free_size=$total_free_size*1024
+    let free_size=$total_free_size-$need_size
+    let reserve_bytes=$RESERVE_SIZE*1024*1024
+
+    let total_free_size_MB=$total_free_size/1024/1024
+    let need_size_MB=$need_size/1024/1024
+    let free_size_MB=$free_size/1024/1024
+    let reserve_size_MB=$reserve_bytes/1024/1024
+
+    echo "==> compute space size ..."
+    echo "total_free_size=$total_free_size_MB MBytes."
+    echo "need_size=$need_size_MB MBytes."
+    echo "free_size=$free_size_MB MBytes."
+    echo "reserve_size=$reserve_size_MB MBytes."
+    if [ $free_size -lt $reserve_bytes ]; then
+        return 1
+    fi
+
+    return 0
+}
+
+backup_dump_file() {
+    echo "==> start to backup dump file ..."
+
+    supervisorctl status postgres | grep 'RUNNING' >>/dev/null
+    if [ $? -ne 0 ]; then
+        echo "ERROR. postgres is not RUNNING."
+        return 1
+    fi
+
+    # assume that dump.sql is 2GB
+    dump_file_size=2000000000
+    check_space $dump_file_size
+    if [ $? -ne 0 ]; then
+        echo "ERROR. There is not enough space to dump."
+        return 1
+    fi
+
+    create_backup_dir
+
+    echo "==> pg_dumpall > $BACKUPDIR/dump.sql ..."
+    su postgres -c "pg_dumpall > $BACKUPDIR/dump.sql"
+
+    if [ $? -ne 0 ]; then
+        echo "ERROR. pg_dumpall failed."
+        return 1
+    fi
+
+    return 0
+}
+
+main() {
+    backup_dump_file
+
+    if [ $? -eq 0 ]; then
+        echo "Done."
+        exit 0
+    else
+        echo "Failed."
+        exit 1
+    fi
+}
+
+args=`getopt "d:r:hV" $*`
+if [ $? -ne 0 ]
+then
+    usage
+fi
+
+set -- $args
+for i in $*
+do
+    case "$i" in
+    -d) DIRRECTORY=$2; shift 2;;
+    -r) RESERVE_SIZE=$2; shift 2;;
+    -h) usage;;
+    -V) echo "version $VERSION"; exit 0;;
+    -\?) usage;;
+    --) shift; break;;
+    esac
+done
+
+#### main
+main

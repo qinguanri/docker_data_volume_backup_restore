@@ -1,0 +1,208 @@
+#!/bin/bash
+#########################
+#  author: Qin Guanri
+#  date  : 2016-12-14
+#########################
+
+VERSION="1.0.0"
+BACKUP_BASE_DIR="/backup/container_pg"
+DIRRECTORY=""                       # the relative directory path of backup files. 
+RESERVE_SIZE=5                      # reserve space size GB
+INDEX=""
+INITDB_BIN=`find -P /usr/lib/postgresql -name "initdb"`
+PGCTL_BIN=`find -P /usr/lib/postgresql -name "pg_ctl"`
+BACKUP_FILE=""
+PG_DATA_DIR="/var/lib/postgresql/9.5/main"
+
+usage() {
+    echo "
+usage:
+
+docker exec -it pg bash restore [options]
+
+the most commonly options are:
+-i      restore with a directory by index. 
+        default is by index, and index=1. e.g: -i 2
+
+-d      restore by a specify directory. Notice that It will use 
+        index if -i is not empty. e.g: -d a1b2c3d4e5
+
+-h      show this usage.     
+
+example:
+docker exec -it pg bash restore
+"
+    exit 0
+}
+
+
+## check_space $need_size. return 0 or 1
+check_space() {
+    echo "==> check space ..."
+
+    need_size=0
+    if [ "$1" != "" ]; then
+        need_size=$1
+    fi
+
+    cd /
+    total_free_size=`df | grep '/dev/mapper/docker' | awk '{print $4}'`
+    let total_free_size=$total_free_size*1024
+    let free_size=$total_free_size-$need_size
+    let reserve_bytes=$RESERVE_SIZE*1024*1024
+
+    let total_free_size_MB=$total_free_size/1024/1024
+    let need_size_MB=$need_size/1024/1024
+    let free_size_MB=$free_size/1024/1024
+    let reserve_size_MB=$reserve_bytes/1024/1024
+
+    echo "==> compute space size ..."
+    echo "total_free_size=$total_free_size_MB MBytes."
+    echo "need_size=$need_size_MB MBytes."
+    echo "free_size=$free_size_MB MBytes."
+    echo "reserve_size=$reserve_size_MB MBytes."
+
+    if [ $free_size -lt $reserve_bytes ]; then
+        return 1
+    fi
+
+    return 0
+}
+
+
+restore_pg() {
+    echo "==> start to restore pg ..."
+
+    ## first time. check whether postgres is running.
+    supervisorctl restart postgres >>/dev/null
+
+    ## second time. if postgres start failed, maybe pg's data is broken. cleanup it. 
+    supervisorctl status postgres | grep 'RUNNING' >> /dev/null
+    if [ $? -ne 0 ]; then
+        echo "WARN. try to start pg failed. pg's data may be broken. we will rebuilt it."
+
+        echo "==> rebuilt a new database ..."
+        rm -rf /var/lib/postgresql/9.*/main/
+        if [ ! -d "$PG_DATA_DIR" ]; then
+            mkdir -p "$PG_DATA_DIR"
+            chown -R postgres:postgres $PG_DATA_DIR
+            chmod -R 700 $PG_DATA_DIR
+        fi
+
+        su postgres -c "$INITDB_BIN -D $PG_DATA_DIR"
+        sleep 5
+        su postgres -c "$PGCTL_BIN -D $PG_DATA_DIR -l logfile stop"
+        echo "==> rebuilt ok."
+        supervisorctl start postgres
+    fi
+
+    ## try to use index at first.
+    if [ "$INDEX" != "" ] && [ "$INDEX" -gt 0 ]; then
+        DIRRECTORY=`ls -lt | sed '1d' | sed -n "$INDEXp" | awk '{print $9}'`
+        if [ "$DIRRECTORY" == "" ]; then
+            echo "ERROR. get an invalid index:$INDEX."
+            return 1
+        fi
+    fi
+
+    if [ "$DIRRECTORY" == "" ] && [ "$INDEX" == "" ]; then
+        if [ ! -d $BACKUP_BASE_DIR ]; then
+            echo "ERROR. cannot find directory $BACKUP_BASE_DIR."
+            return 1
+        fi
+        cd $BACKUP_BASE_DIR
+        DIRRECTORY=`ls -lt | sed '1d' | head -1 | awk '{print $9}'`
+        if [ "$DIRRECTORY" == "" ]; then
+            echo "ERROR. Backup directory is empty."
+            return 1
+        fi
+    fi
+
+    BACKUP_FILE="$BACKUP_BASE_DIR/$DIRRECTORY/dump.sql"
+
+    if [ ! -e $BACKUP_FILE ]; then
+        echo "ERROR. cannot find backup file: $BACKUP_FILE"
+        return 1
+    fi
+
+    size=`ls -l $BACKUP_FILE | awk '{print $5}'`
+    check_space $size
+    if [ $? -ne 0 ]; then
+        echo "ERROR. There is not enough reserve space to restore. reserve size is $RESERVE_SIZE GB."
+        return 1
+    fi
+
+    DBNAMES=$(su postgres -c "psql -P format=Unaligned -tqc 'SELECT datname FROM pg_database;' | sed 's/ /%/g'")
+    DBEXCLUDE=("postgres template0 template1")
+
+    for exclude in $DBEXCLUDE ; do
+        DBNAMES=$(echo $DBNAMES | sed "s/\b$exclude\b//g")
+    done
+
+    for DB in $DBNAMES ; do
+        DB_old=$DB"_old"
+        echo "==> alter database $DB rename to $DB_old..."
+        su postgres -c "psql -U postgres -Atc \"alter database $DB rename to $DB_old;\"" >>/dev/null
+    done
+
+    echo "==> restore. cmd:  psql -f $BACKUP_FILE ..."
+
+    su postgres -c "psql -f $BACKUP_FILE 2>&1" >>/dev/null
+
+    supervisorctl status postgres | grep 'RUNNING' >>/dev/null
+    if [ $? -ne 0 ]; then
+        echo "ERROR. restore failed. postgres is not running. rollback ..."
+        supervisorctl restart postgres
+
+        for DB in $DBNAMES ; do
+            DB_old=$DB"_old"
+            echo "==> alter database $DB rename to $DB_old ..."
+            su postgres -c "psql -U postgres -Atc \"alter database $DB_old rename to $DB;\"" >>/dev/null
+        done
+        return 1
+    fi
+
+    for DB in $DBNAMES ; do
+        DB_old=$DB"_old"
+        echo "==> drop database if exists $DB_old ..."
+        su postgres -c "psql -U postgres -Atc \"drop database if exists $DB_old;\"" >>/dev/null
+    done
+
+    return 0
+}
+
+
+main() {
+    restore_pg
+
+    if [ $? -eq 0 ]; then
+        echo "Done."
+        exit 0
+    else
+        echo "Failed."
+        exit 1
+    fi
+}
+
+
+args=`getopt "i:d:hV" $*`
+if [ $? -ne 0 ]
+then
+    usage
+fi
+
+set -- $args
+for i in $*
+do
+    case "$i" in
+    -i) INDEX=$2; shift 2;;
+    -d) DIRRECTORY=$2; shift 2;;
+    -h) usage;;
+    -V) echo "version $VERSION"; exit 0;;
+    -\?) usage;;
+    --) shift; break;;
+    esac
+done
+
+#### main
+main
