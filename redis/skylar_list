@@ -11,31 +11,36 @@ usage() {
     echo "
 usage:
 
-docker exec -it redis bash list [options]
+docker exec redis list [options]
 
 the most commonly options are:
 -V                  show version.
 -h                  show this usage.
 
 example:
-docker exec -it redis bash list
+docker exec redis list
 "
     exit 0
 }
 
+## skylar_log <level> <content>
+skylar_log() {
+    echo "$2"
+    echo  "`date` $1 $2" >> /var/log/skylar_backup_restore.log
+}
 
 main() {
-    printf "%5s %10s %4s %2s %4s %20s\n" "index" "size" "create" "date" "time" "directory"
+    printf "%5s %10s %20s %20s\n" "index" "size" "createtime" "directory" 
     if [ ! -d $BACKUP_BASE_DIR ]; then
         exit 0
     fi
 
     cd $BACKUP_BASE_DIR
-    ls -lt | sed '1d' | awk '{printf("%5d %10s %4s %2s %4s /backup/container_redis/%s\n", NR, $5, $6, $7, $8, $9)}'
+    ls -lth --time-style="+%Y-%m-%d %H:%M:%S" | sed '1d' | awk '{printf("%5d %10s %9s%9s /backup/container_redis/%s\n", NR, $5, $6, $7, $8)}'
 }
 
 
-args=`getopt "d:r:hV" $*`
+args=`getopt "hV" $*`
 if [ $? -ne 0 ]
 then
     usage

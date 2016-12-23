@@ -15,7 +15,7 @@ usage() {
     echo "
 usage:
 
-docker exec -it main bash clean [options]
+docker exec main clean [options]
 
 the most commonly options are:
 -i  index       clean a backup directory by index. 
@@ -28,18 +28,24 @@ the most commonly options are:
 -h              show this usage.     
 
 example:
-docker exec -it main bash clean
+docker exec main clean
 "
     exit 0
 }
 
+## skylar_log <level> <content>
+skylar_log() {
+    echo "$2"
+    echo  "`date` $1 $2" >> /var/log/skylar_backup_restore.log
+}
+
 clean_all() {
     if [ "$BACKUP_BASE_DIR" == "*" ] || [ "$BACKUP_BASE_DIR" == "" ]; then
-        echo "ERROR. Backup directory is invalid. BACKUP_BASE_DIR=$BACKUP_BASE_DIR"
+        skylar_log "ERROR" "ERROR. Backup directory is invalid. BACKUP_BASE_DIR=$BACKUP_BASE_DIR"
         return 1
     fi
 
-    echo "==> clean all backup directories ..."
+    skylar_log "INFO" "==> clean all backup directories ..."
     rm -rf $BACKUP_BASE_DIR
 }
 
@@ -56,7 +62,7 @@ main() {
 }
 
 
-args=`getopt "d:r:hV" $*`
+args=`getopt "i:d:ahV" $*`
 if [ $? -ne 0 ]
 then
     usage

@@ -9,6 +9,7 @@ BACKUP_BASE_DIR="/backup/container_main"
 BACKUPDIR=""
 DIRRECTORY=""                       # the relative directory path of backup files. 
 RESERVE_SIZE=5                      # reserve space size GB
+BACKUP_FILE=""
 
 SKYLARMINIDE_DIR="/opt/tools/skylarminide"
 
@@ -16,11 +17,11 @@ usage() {
     echo "
 usage:
 
-docker exec -it main bash backup [options]
+docker exec main backup [options]
 
 the most commonly options are:
--d  directory       the relative directory path of backup files. 
-                    default is the timestamp. e.g: -d 20161201000000
+-f  file            backup data to the specify file. default is: /backup/container_main/<timestamp>.tar. 
+                    e.g: -f /backup/container_main/20161201000000.tar
 
 -r  reservespace    the reserve space size (unit GBytes). Backup will return error
                     if there is not enough reserve space. default is 5GB. e.g: -r 10
@@ -29,35 +30,59 @@ the most commonly options are:
 -h                  show this usage.
 
 example:
-docker exec -it main bash backup
+docker exec main backup
 "
     exit 0
+}
+
+## skylar_log <level> <content>
+skylar_log() {
+    echo "$2"
+    echo  "`date` $1 $2" >> /var/log/skylar_backup_restore.log
 }
 
 ## we will create a directory specified by argument '-d'.
 ## if '-d' is empty, we will create a default directory named by timestamp. 
 create_backup_dir() {
-    echo "==> create backup directory ..."
+    skylar_log "INFO" "==> create backup directory ..."
+    [ ! -d $BACKUP_BASE_DIR ] && mkdir -p $BACKUP_BASE_DIR
+}
 
-    if [ "$DIRRECTORY" == "" ]; then
-        DIRRECTORY=`date "+%Y%m%d%H%M%S"`
+check_args_valid() {
+    if [ "$BACKUP_FILE" == "" ]; then
+        datetime=`date "+%Y%m%d%H%M%S"`
+        BACKUP_FILE="$BACKUP_BASE_DIR/$datetime"".tar"
     fi
 
-    BACKUPDIR="$BACKUP_BASE_DIR/$DIRRECTORY"
-
-    if [ -d $BACKUPDIR ]; then
-        echo "ERROR. $BACKUPDIR is already exsit."
+    FILE=`basename $BACKUP_FILE`
+    echo "$FILE" | grep -q '^[a-zA-Z0-9\.]\+$' >>/dev/null
+    if [ $? -ne 0 ]; then
+        skylar_log "ERROR" "Invalid name of backupfile: $BACKUP_FILE"
         exit 1
     fi
 
-    mkdir -p $BACKUPDIR
-}
+    echo "$BACKUP_FILE" | grep '.tar' >>/dev/null
+    if [ $? -ne 0 ]; then
+        skylar_log "ERROR" "Invalid name of backupfile: $BACKUP_FILE"
+        exit 1
+    fi
 
+    echo "$BACKUP_FILE" | grep '/backup/container_main' >>/dev/null
+    if [ $? -ne 0 ]; then
+        skylar_log "ERROR" "Invalid name of backupfile: $BACKUP_FILE"
+        exit 1
+    fi
+
+    if [ -f $BACKUP_FILE ]; then
+        skylar_log "ERROR" "$BACKUP_FILE is exist."
+        exit 1
+    fi
+}
 
 ## check_space $need_size. unit Bytes. 
 ## return 0 if free space is enough, else return 1.
 check_space() {
-    echo "==> check space ..."
+    skylar_log "INFO" "==> check space ..."
 
     need_size=0
     if [ "$1" != "" ] && [ "$1" -gt 0 ]; then
@@ -66,6 +91,11 @@ check_space() {
 
     cd /
     total_free_size=`df | grep '/dev/mapper/docker' | awk '{print $4}'`
+    df | grep '/etc/hosts' >>/dev/null
+    if [ $? -eq 0 ]; then
+        total_free_size=`df | grep '/dev/mapper/docker' | awk '{print $4}'`
+    fi
+
     let total_free_size=$total_free_size*1024
     let free_size=$total_free_size-$need_size
     let reserve_bytes=$RESERVE_SIZE*1024*1024
@@ -75,11 +105,11 @@ check_space() {
     let free_size_MB=$free_size/1024/1024
     let reserve_size_MB=$reserve_bytes/1024/1024
 
-    echo "==> compute space size ..."
-    echo "total_free_size=$total_free_size_MB MBytes."
-    echo "need_size=$need_size_MB MBytes."
-    echo "free_size=$free_size_MB MBytes."
-    echo "reserve_size=$reserve_size_MB MBytes."
+    skylar_log "INFO" "==> compute space size ..."
+    skylar_log "INFO" "total_free_size=$total_free_size_MB MBytes."
+    skylar_log "INFO" "need_size=$need_size_MB MBytes."
+    skylar_log "INFO" "free_size=$free_size_MB MBytes."
+    skylar_log "INFO" "reserve_size=$reserve_size_MB MBytes."
 
     if [ $free_size -lt $reserve_bytes ]; then
         return 1
@@ -89,67 +119,47 @@ check_space() {
 }
 
 backup_skylarminide() {
-    echo "==> start to backup skylarminide ..."
+    skylar_log "INFO" "==> start to backup skylarminide ..."
 
     if [ ! -d $SKYLARMINIDE_DIR ] || [ ! -d "$SKYLARMINIDE_DIR/data" ]; then
         echo "ERROR. cannot find directory: $SKYLARMINIDE_DIR/data."
         return 1
     fi
 
-    echo "==> supervisorctl stop skylarminide ..."
+    skylar_log "INFO" "==> supervisorctl stop skylarminide ..."
     supervisorctl stop skylarminide
 
-    # check space before tar. 100MB
-    check_space 100000000  
-
-    cd $SKYLARMINIDE_DIR
-    echo "==> tar $SKYLARMINIDE_DIR/data ..."
-    [ -f data.tar ] && rm -f data.tar
-    tar cvf data.tar data >>/dev/null
-
-    echo "==> supervisorctl start skylarminide ..."
-    supervisorctl start skylarminide
-
-    if [ ! -e data.tar ]; then
-        echo "ERROR. tar failed: data.tar"
-        return 1
-    fi
-
-    [ -f data.tar.gz ] && rm -f data.tar.gz
-    gzip data.tar
-    if [ $? -ne 0 ]; then
-        echo "ERROR. gzip $SKYLARMINIDE_DIR/data failed."
-        return 1
-    fi
-
-    need_size=`ls -l $SKYLARMINIDE_DIR/data.tar.gz | awk '{print $5}'`
-    check_space $need_size
-    if [ $? -ne 0 ]; then
-        echo "ERROR. There is not enough reserve space to backup $SKYLARMINIDE_DIR/data.tar.gz. Reserve size is $RESERVE_SIZE GB."
-        return 1
-    fi
+    # check space before tar. 1GB
+    check_space 1000000000  
 
     create_backup_dir
+    cd $SKYLARMINIDE_DIR
+    skylar_log "INFO" "==> backup data to $BACKUP_FILE ..."
+    tar cvf $BACKUP_FILE data
 
-    echo "==> backup to $BACKUPDIR ..."
-    mv $SKYLARMINIDE_DIR/data.tar.gz $BACKUPDIR
+    skylar_log "INFO" "==> supervisorctl start skylarminide ..."
+    supervisorctl start skylarminide
 
     return 0
 }
 
 main() {
+    if ! check_args_valid; then
+        exit 1
+    fi
+
     backup_skylarminide
 
     if [ $? -eq 0 ]; then
-        echo "Done."
+        skylar_log "INFO" "Done."
         exit 0
     else
-        echo "Failed."
+        skylar_log "ERROR" "Failed."
         exit 1
     fi
 }
 
-args=`getopt "d:r:hV" $*`
+args=`getopt "f:r:hV" $*`
 if [ $? -ne 0 ]
 then
     usage
@@ -159,7 +169,7 @@ set -- $args
 for i in $*
 do
     case "$i" in
-    -d) DIRRECTORY=$2; shift 2;;
+    -f) BACKUP_FILE=$2; shift 2;;
     -r) RESERVE_SIZE=$2; shift 2;;
     -h) usage;;
     -V) echo "version $VERSION"; exit 0;;

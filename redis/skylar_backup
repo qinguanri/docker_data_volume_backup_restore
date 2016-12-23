@@ -6,11 +6,14 @@
 
 VERSION="1.0.0"
 BACKUP_BASE_DIR="/backup/container_redis"
-BACKUPDIR=""
+
 DIRRECTORY=""                       # the relative directory path of backup files. 
 RESERVE_SIZE=5                      # reserve space size GB
 
+BACKUP_FILE=""
 REDIS_AOF_FILE="/var/lib/redis/appendonly.aof"
+REDIS_RDB_FILE="/var/lib/redis/dump.rdb"
+REDIS_CONF_FILE="/var/lib/redis/redis.conf"
 
 REDIS_CLI=`which redis-cli`
 
@@ -18,11 +21,11 @@ usage() {
     echo "
 usage:
 
-docker exec -it redis bash backup [options]
+docker exec redis backup [options]
 
 the most commonly options are:
--d  directory       the relative directory path of backup files. 
-                    default is the timestamp. e.g: -d 20161201000000
+-f  file            backup data to the specify file. default is: /backup/container_main/<timestamp>.tar. 
+                    e.g: -f /backup/container_main/20161201000000.tar
 
 -r  reservespace    the reserve space size (unit GBytes). Backup will return error
                     if there is not enough reserve space. default is 5GB. e.g: -r 10
@@ -31,35 +34,60 @@ the most commonly options are:
 -h                  show this usage.
 
 example:
-docker exec -it redis bash backup
+docker exec redis backup
 "
     exit 0
+}
+
+## skylar_log <level> <content>
+skylar_log() {
+    echo "$2"
+    echo  "`date` $1 $2" >> /var/log/skylar_backup_restore.log
+}
+
+check_args_valid() {
+    if [ "$BACKUP_FILE" == "" ]; then
+        datetime=`date "+%Y%m%d%H%M%S"`
+        BACKUP_FILE="$BACKUP_BASE_DIR/$datetime"".tar"
+    fi
+
+    FILE=`basename $BACKUP_FILE`
+    echo "$FILE" | grep -q '^[a-zA-Z0-9\.]\+$' >>/dev/null
+    if [ $? -ne 0 ]; then
+        skylar_log "ERROR" "Invalid name of backupfile: $BACKUP_FILE"
+        exit 1
+    fi
+
+    echo "$BACKUP_FILE" | grep '.tar' >>/dev/null
+    if [ $? -ne 0 ]; then
+        skylar_log "ERROR" "Invalid name of backupfile: $BACKUP_FILE"
+        exit 1
+    fi
+
+    echo "$BACKUP_FILE" | grep '/backup/container_redis' >>/dev/null
+    if [ $? -ne 0 ]; then
+        skylar_log "ERROR" "Invalid name of backupfile: $BACKUP_FILE"
+        exit 1
+    fi
+
+    if [ -f $BACKUP_FILE ]; then
+        skylar_log "ERROR" "$BACKUP_FILE is exist."
+        exit 1
+    fi
 }
 
 ## we will create a directory specified by argument '-d'.
 ## if '-d' is empty, we will create a default directory named by timestamp. 
 create_backup_dir() {
-    echo "==> create backup directory ..."
-
-    if [ "$DIRRECTORY" == "" ]; then
-        DIRRECTORY=`date "+%Y%m%d%H%M%S"`
-    fi
-
-    BACKUPDIR="$BACKUP_BASE_DIR/$DIRRECTORY"
-
-    if [ -d $BACKUPDIR ]; then
-        echo "ERROR. $BACKUPDIR is already exsit."
-        exit 1
-    fi
-
-    mkdir -p $BACKUPDIR
+    skylar_log "INFO" "==> create backup directory ..."
+    [ ! -d $BACKUP_BASE_DIR ] && mkdir -p $BACKUP_BASE_DIR 
 }
 
 
 ## check_space $need_size. unit Bytes. 
 ## return 0 if free space is enough, else return 1.
 check_space() {
-    echo "==> check space ..."
+    skylar_log "INFO" "==> check space ..."
 
     need_size=0
     if [ "$1" != "" ]; then
@@ -68,6 +96,11 @@ check_space() {
 
     cd /
     total_free_size=`df | grep '/dev/mapper/docker' | awk '{print $4}'`
+    df | grep '/etc/hosts' >>/dev/null
+    if [ $? -eq 0 ]; then
+        total_free_size=`df | grep '/dev/mapper/docker' | awk '{print $4}'`
+    fi
+
     let total_free_size=$total_free_size*1024
     let free_size=$total_free_size-$need_size
     let reserve_bytes=$RESERVE_SIZE*1024*1024
@@ -77,11 +110,11 @@ check_space() {
     let free_size_MB=$free_size/1024/1024
     let reserve_size_MB=$reserve_bytes/1024/1024
 
-    echo "==> compute space size ..."
-    echo "total_free_size=$total_free_size_MB MBytes."
-    echo "need_size=$need_size_MB MBytes."
-    echo "free_size=$free_size_MB MBytes."
-    echo "reserve_size=$reserve_size_MB MBytes."
+    skylar_log "INFO" "==> compute space size ..."
+    skylar_log "INFO" "total_free_size=$total_free_size_MB MBytes."
+    skylar_log "INFO" "need_size=$need_size_MB MBytes."
+    skylar_log "INFO" "free_size=$free_size_MB MBytes."
+    skylar_log "INFO" "reserve_size=$reserve_size_MB MBytes."
 
     if [ $free_size -lt $reserve_bytes ]; then
         return 1
@@ -91,45 +124,54 @@ check_space() {
 }
 
 backup_aof() {
-    echo "==> start to backup aof ..."
+    skylar_log "INFO" "==> start to backup aof ..."
 
     if [ ! -e $REDIS_AOF_FILE ]; then
-        echo "WARN. $REDIS_AOF_FILE is not exsit yet. I will create it by cmd: $REDIS_CLI bgrewriteaof."
+        skylar_log "WARN" "WARN. create aof by cmd: $REDIS_CLI bgrewriteaof."
         $REDIS_CLI bgrewriteaof
     fi
 
     if [ ! -e $REDIS_AOF_FILE ]; then
-        echo "ERROR. cannot find $REDIS_AOF_FILE."
+        skylar_log "ERROR" "ERROR. cannot find $REDIS_AOF_FILE."
         return 1
     fi
 
     aof_size=`ls -l $REDIS_AOF_FILE | awk '{print $5}'`
     check_space $aof_size
     if [ $? -ne 0 ]; then
-        echo "ERROR. There is not enough reserve space to backup $REDIS_AOF_FILE. Reserve size is $RESERVE_SIZE GB."
+        skylar_log "ERROR" "ERROR. There is not enough reserve space to backup $REDIS_AOF_FILE. Reserve size is $RESERVE_SIZE GB."
         return 1
     fi
 
     create_backup_dir
 
-    cp $REDIS_AOF_FILE $BACKUPDIR
-
-    return 0
+    cd $BACKUP_BASE_DIR
+    rm -f appendonly.aof dump.rdb redis.conf
+    cp -f $REDIS_AOF_FILE appendonly.aof
+    cp -f $REDIS_RDB_FILE dump.rdb
+    cp -f $REDIS_CONF_FILE redis.conf
+    tar cvf $BACKUP_FILE appendonly.aof dump.rdb redis.conf
+    rm -f appendonly.aof dump.rdb redis.conf
+    return $?
 }
 
 main() {
+    if ! check_args_valid; then
+        exit 1
+    fi
+
     backup_aof
 
     if [ $? -eq 0 ]; then
-        echo "Done."
+        skylar_log "INFO" "Done."
         exit 0
     else
-        echo "Failed."
+        skylar_log "ERROR" "Failed."
         exit 1
     fi
 }
 
-args=`getopt "d:r:hV" $*`
+args=`getopt "f:r:hV" $*`
 if [ $? -ne 0 ]
 then
     usage
@@ -139,7 +181,7 @@ set -- $args
 for i in $*
 do
     case "$i" in
-    -d) DIRRECTORY=$2; shift 2;;
+    -f) BACKUP_FILE=$2; shift 2;;
     -r) RESERVE_SIZE=$2; shift 2;;
     -h) usage;;
     -V) echo "version $VERSION"; exit 0;;

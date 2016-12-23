@@ -9,36 +9,64 @@ BACKUP_BASE_DIR="/backup/container_pg"
 DIRRECTORY=""                       # the relative directory path of backup files. 
 RESERVE_SIZE=5                      # reserve space size GB
 INDEX=""
-INITDB_BIN=`find -P /usr/lib/postgresql -name "initdb"`
-PGCTL_BIN=`find -P /usr/lib/postgresql -name "pg_ctl"`
+INITDB_BIN=`find -P /usr/lib/postgresql/ -name "initdb"`
+PGCTL_BIN=`find -P /usr/lib/postgresql/ -name "pg_ctl"`
 BACKUP_FILE=""
 PG_DATA_DIR="/var/lib/postgresql/9.5/main"
+PG_DATA_OLD="/var/lib/postgresql/9.5/main_old"
+
+PG_DUMP_FILE=""
+PG_CONF_FILE=""
+PG_HBA_CONF=""
+PG_AUTO_CONF=""
+PG_IDENT_CONF=""
+
 
 usage() {
     echo "
 usage:
 
-docker exec -it pg bash restore [options]
+docker exec pg restore [options]
 
 the most commonly options are:
--i      restore with a directory by index. 
-        default is by index, and index=1. e.g: -i 2
+-i  index    restore with a directory by index. 
+             default is by index, and index=1. e.g: -i 2
 
--d      restore by a specify directory. Notice that It will use 
-        index if -i is not empty. e.g: -d a1b2c3d4e5
+-f  file     restore by a specify file. Notice that It will use 
+             index if -i is not empty. e.g: -f /backup/container_pg/20161212000000.tar
 
 -h      show this usage.     
 
 example:
-docker exec -it pg bash restore
+docker exec pg restore
 "
     exit 0
 }
 
+## skylar_log <level> <content>
+skylar_log() {
+    echo "$2"
+    echo  "`date` $1 $2" >> /var/log/skylar_backup_restore.log
+}
 
+
+check_args_valid() {
+    if [ "$INDEX" != "" ] && [ "$INDEX" -lt 1 ]; then
+        skylar_log "ERROR" "ERROR. invalid index"
+        return 1
+    fi
+    if [ "$BACKUP_FILE" != "" ]; then
+        if [ ! -f "$BACKUP_FILE" ]; then
+            skylar_log "ERROR" "ERROR. cannot find file: $BACKUP_FILE"
+            return 1
+        fi
+    fi
+
+    return 0
+}
 ## check_space $need_size. return 0 or 1
 check_space() {
-    echo "==> check space ..."
+    skylar_log "INFO" "==> check space ..."
 
     need_size=0
     if [ "$1" != "" ]; then
@@ -56,11 +84,11 @@ check_space() {
     let free_size_MB=$free_size/1024/1024
     let reserve_size_MB=$reserve_bytes/1024/1024
 
-    echo "==> compute space size ..."
-    echo "total_free_size=$total_free_size_MB MBytes."
-    echo "need_size=$need_size_MB MBytes."
-    echo "free_size=$free_size_MB MBytes."
-    echo "reserve_size=$reserve_size_MB MBytes."
+    skylar_log "INFO" "==> compute space size ..."
+    skylar_log "INFO" "total_free_size=$total_free_size_MB MBytes."
+    skylar_log "INFO" "need_size=$need_size_MB MBytes."
+    skylar_log "INFO" "free_size=$free_size_MB MBytes."
+    skylar_log "INFO" "reserve_size=$reserve_size_MB MBytes."
 
     if [ $free_size -lt $reserve_bytes ]; then
         return 1
@@ -69,123 +97,138 @@ check_space() {
     return 0
 }
 
-
-restore_pg() {
-    echo "==> start to restore pg ..."
-
-    ## first time. check whether postgres is running.
-    supervisorctl restart postgres >>/dev/null
-
-    ## second time. if postgres start failed, maybe pg's data is broken. cleanup it. 
-    supervisorctl status postgres | grep 'RUNNING' >> /dev/null
-    if [ $? -ne 0 ]; then
-        echo "WARN. try to start pg failed. pg's data may be broken. we will rebuilt it."
-
-        echo "==> rebuilt a new database ..."
-        rm -rf /var/lib/postgresql/9.*/main/
-        if [ ! -d "$PG_DATA_DIR" ]; then
-            mkdir -p "$PG_DATA_DIR"
-            chown -R postgres:postgres $PG_DATA_DIR
-            chmod -R 700 $PG_DATA_DIR
-        fi
-
-        su postgres -c "$INITDB_BIN -D $PG_DATA_DIR"
-        sleep 5
-        su postgres -c "$PGCTL_BIN -D $PG_DATA_DIR -l logfile stop"
-        echo "==> rebuilt ok."
-        supervisorctl start postgres
-    fi
-
+check_backup_file() {
     ## try to use index at first.
     if [ "$INDEX" != "" ] && [ "$INDEX" -gt 0 ]; then
-        DIRRECTORY=`ls -lt | sed '1d' | sed -n "$INDEXp" | awk '{print $9}'`
-        if [ "$DIRRECTORY" == "" ]; then
-            echo "ERROR. get an invalid index:$INDEX."
+        cd $BACKUP_BASE_DIR
+        FILE=`ls -lt | sed '1d' | sed -n "$INDEX p" | awk '{print $9}'`
+        if [ ! -f "$FILE" ]; then
+            skylar_log "ERROR" "ERROR. get an invalid index:$INDEX."
             return 1
         fi
+        BACKUP_FILE=$BACKUP_BASE_DIR/$FILE
     fi
 
-    if [ "$DIRRECTORY" == "" ] && [ "$INDEX" == "" ]; then
+    if [ "$BACKUP_FILE" == "" ] && [ "$INDEX" == "" ]; then
         if [ ! -d $BACKUP_BASE_DIR ]; then
-            echo "ERROR. cannot find directory $BACKUP_BASE_DIR."
+            skylar_log "ERROR" "ERROR. cannot find directory $BACKUP_BASE_DIR."
             return 1
         fi
         cd $BACKUP_BASE_DIR
-        DIRRECTORY=`ls -lt | sed '1d' | head -1 | awk '{print $9}'`
-        if [ "$DIRRECTORY" == "" ]; then
-            echo "ERROR. Backup directory is empty."
-            return 1
-        fi
+
+        FILE=`ls -lt | sed '1d' | head -1 | awk '{print $9}'`
+        BACKUP_FILE=$BACKUP_BASE_DIR/$FILE
     fi
 
-    BACKUP_FILE="$BACKUP_BASE_DIR/$DIRRECTORY/dump.sql"
-
-    if [ ! -e $BACKUP_FILE ]; then
-        echo "ERROR. cannot find backup file: $BACKUP_FILE"
+    if [ ! -f "$BACKUP_FILE" ]; then
+        skylar_log "ERROR" "ERROR. Backup directory is empty."
         return 1
     fi
 
     size=`ls -l $BACKUP_FILE | awk '{print $5}'`
     check_space $size
     if [ $? -ne 0 ]; then
-        echo "ERROR. There is not enough reserve space to restore. reserve size is $RESERVE_SIZE GB."
+        skylar_log "ERROR" "ERROR. There is not enough reserve space to restore. reserve size is $RESERVE_SIZE GB."
         return 1
     fi
 
-    DBNAMES=$(su postgres -c "psql -P format=Unaligned -tqc 'SELECT datname FROM pg_database;' | sed 's/ /%/g'")
-    DBEXCLUDE=("postgres template0 template1")
+    [ -d $BACKUP_BASE_DIR/tmp ] && rm -rf $BACKUP_BASE_DIR/tmp
+    mkdir -p $BACKUP_BASE_DIR/tmp
+    cd $BACKUP_BASE_DIR
+    tar xvf $BACKUP_FILE -C $BACKUP_BASE_DIR/tmp >>/dev/null
 
-    for exclude in $DBEXCLUDE ; do
-        DBNAMES=$(echo $DBNAMES | sed "s/\b$exclude\b//g")
-    done
+    PG_DUMP_FILE=`find -P $BACKUP_BASE_DIR/tmp -name "dump.sql"`
+    PG_CONF_FILE=`find -P $BACKUP_BASE_DIR/tmp -name "postgresql.conf"`
+    PG_HBA_CONF=`find -P $BACKUP_BASE_DIR/tmp -name "pg_hba.conf"`
+    PG_AUTO_CONF=`find -P $BACKUP_BASE_DIR/tmp -name "postgresql.auto.conf"`
+    PG_IDENT_CONF=`find -P $BACKUP_BASE_DIR/tmp -name "pg_ident.conf"`
 
-    for DB in $DBNAMES ; do
-        DB_old=$DB"_old"
-        echo "==> alter database $DB rename to $DB_old..."
-        su postgres -c "psql -U postgres -Atc \"alter database $DB rename to $DB_old;\"" >>/dev/null
-    done
-
-    echo "==> restore. cmd:  psql -f $BACKUP_FILE ..."
-
-    su postgres -c "psql -f $BACKUP_FILE 2>&1" >>/dev/null
-
-    supervisorctl status postgres | grep 'RUNNING' >>/dev/null
-    if [ $? -ne 0 ]; then
-        echo "ERROR. restore failed. postgres is not running. rollback ..."
-        supervisorctl restart postgres
-
-        for DB in $DBNAMES ; do
-            DB_old=$DB"_old"
-            echo "==> alter database $DB rename to $DB_old ..."
-            su postgres -c "psql -U postgres -Atc \"alter database $DB_old rename to $DB;\"" >>/dev/null
-        done
+    if [ ! -f "$PG_DUMP_FILE" ] || [ ! -f "$PG_CONF_FILE" ] || [ ! -f "$PG_HBA_CONF" ]; then
+        skylar_log "ERROR" "cannot find files:$PG_DUMP_FILE or $PG_CONF_FILE or $PG_HBA_CONF."
+        rm -rf $BACKUP_BASE_DIR/tmp
         return 1
     fi
 
-    for DB in $DBNAMES ; do
-        DB_old=$DB"_old"
-        echo "==> drop database if exists $DB_old ..."
-        su postgres -c "psql -U postgres -Atc \"drop database if exists $DB_old;\"" >>/dev/null
-    done
+    return 0
+}
 
+restore_pg() {
+    skylar_log "INFO" "==> start to restore pg ..."
+
+    # step 0. check backup files valid
+    if ! check_backup_file; then
+        return 1
+    fi
+
+    # step 1. stop pg
+    skylar_log "INFO" "==> stop pg ..."
+    supervisorctl stop postgres >>/dev/null
+    kill -9 $(ps -ef | grep postgres | awk {'print $2'})
+
+    # step 2. backup old data to tmp
+    skylar_log "INFO" "==> backup $PG_DATA_DIR to $PG_DATA_OLD ..."
+    [ -d $PG_DATA_OLD ] && rm -rf $PG_DATA_OLD
+    ## cannot move directly. so we copy then remove.
+    cp -rf $PG_DATA_DIR $PG_DATA_OLD
+    rm -rf $PG_DATA_DIR
+
+    # step 3. create new db
+    skylar_log "INFO" "==> create new db ..."
+    mkdir -p "$PG_DATA_DIR"
+    chown -R postgres:postgres $PG_DATA_DIR
+    chmod -R 700 $PG_DATA_DIR
+
+    su postgres -c "$INITDB_BIN -D $PG_DATA_DIR"
+    sleep 5
+    su postgres -c "$PGCTL_BIN -D $PG_DATA_DIR -l logfile stop"
+    supervisorctl stop postgres
+    kill -9 $(ps -ef | grep postgres | awk {'print $2'})
+    ### restore config files
+    cp $PG_CONF_FILE $PG_DATA_DIR
+    cp $PG_HBA_CONF $PG_DATA_DIR
+    cp $PG_IDENT_CONF $PG_DATA_DIR
+    cp $PG_AUTO_CONF $PG_DATA_DIR
+
+    # step 4. import dump.sql
+    supervisorctl start postgres
+    su postgres -c "psql -f $PG_DUMP_FILE 2>&1" >>/dev/null
+    rm -rf $BACKUP_BASE_DIR/tmp
+
+    # step 5. succeed or rollback.
+    if ! supervisorctl status postgres; then
+        skylar_log "ERROR" "restore failed. rollback ..."
+        [ -d $PG_DATA_DIR ] && rm -rf $PG_DATA_DIR
+        mv $PG_DATA_OLD $PG_DATA_DIR
+
+        supervisorctl stop postgres
+        kill -9 $(ps -ef | grep postgres | awk {'print $2'})
+        supervisorctl start postgres
+        exit 1
+    fi
+
+    rm -rf $PG_DATA_OLD
     return 0
 }
 
 
 main() {
+    if ! check_args_valid; then
+        exit 1
+    fi
+
     restore_pg
 
     if [ $? -eq 0 ]; then
-        echo "Done."
+        skylar_log "INFO" "Done."
         exit 0
     else
-        echo "Failed."
+        skylar_log "ERROR" "Failed."
         exit 1
     fi
 }
 
 
-args=`getopt "i:d:hV" $*`
+args=`getopt "i:f:hV" $*`
 if [ $? -ne 0 ]
 then
     usage
@@ -196,7 +239,7 @@ for i in $*
 do
     case "$i" in
     -i) INDEX=$2; shift 2;;
-    -d) DIRRECTORY=$2; shift 2;;
+    -f) BACKUP_FILE=$2; shift 2;;
     -h) usage;;
     -V) echo "version $VERSION"; exit 0;;
     -\?) usage;;
