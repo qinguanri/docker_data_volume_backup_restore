@@ -6,6 +6,13 @@
 
 VERSION="1.0.0"
 
+# usage: log_info <log_content>
+log_info()  { _log "INFO" "$1" }
+log_warn()  { _log "WARN" "$1" }
+log_error() { _log "ERROR" "$1" }
+_log() { echo "$2"; echo "`date` $1 $2" >> $LOG_FILE }
+
+# which kind of container
 CONTAINER_NAME=""
 if [ -d "/opt/tools/openresty/nginx" ]; then
     CONTAINER_NAME="main"
@@ -18,19 +25,19 @@ else
     exit 1
 fi
 
-
+# global var
 BACKUP_BASE_DIR="/backup/container_$CONTAINER_NAME"
 LOG_FILE="/var/log/skylar_backup_restore.log"
 BACKUP_FILE=""
-BACKUP_TARGET=""
 INDEX=""
-RESERVE_SIZE=5
-# ------- main
+RESERVE_SIZE=5   # unit GB
+
+# ------- global var for container 'main'
 if [ "$CONTAINER_NAME" == "main" ]; then 
     SKYLARMINIDE_DIR="/opt/tools/skylarminide"
 fi
 
-# ------- redis
+# ------- global var for container 'redis'
 if [ "$CONTAINER_NAME" == "redis" ]; then
     REDIS_AOF_FILE="/var/lib/redis/appendonly.aof"
     REDIS_AOF_FILE_OLD="/var/lib/redis/appendonly.aof.old"
@@ -43,7 +50,7 @@ if [ "$CONTAINER_NAME" == "redis" ]; then
     REDIS_CLI=`which redis-cli`
 fi
 
-# ------- postgresql
+# ------- global var for container 'postgresql'
 if [ "$CONTAINER_NAME" == "pg" ]; then
     INITDB_BIN=`find -P /usr/lib/postgresql/ -name "initdb"`
     PG_CTL_BIN=`find -P /usr/lib/postgresql/ -name "pg_ctl"`
@@ -115,11 +122,7 @@ see logfile at $LOG_FILE.
     exit 0
 }
 
-# usage: log_info <log_content>
-log_info()  { _log "INFO" "$1" }
-log_warn()  { _log "WARN" "$1" }
-log_error() { _log "ERROR" "$1" }
-_log() { echo "$2"; echo "`date` $1 $2" >> $LOG_FILE }
+
 
 ## check_space $need_size. unit Bytes. 
 ## return 0 if free space is enough, else return 1.
@@ -154,43 +157,12 @@ check_space() {
     log_info "reserve_size=$reserve_size_MB MBytes."
 
     if [ $free_size -lt $reserve_bytes ]; then
-        log_error "There is not enough reserve space. Reserve size is $RESERVE_SIZE GB." 
+        log_error "There is not enough reserve space. \
+                  Reserve size is $RESERVE_SIZE GB." 
         return 1
     fi
 
     return 0
-}
-
-
-check_args_valid() {
-    if [ "$BACKUP_FILE" == "" ]; then
-        datetime=`date "+%Y%m%d%H%M%S"`
-        BACKUP_FILE="$BACKUP_BASE_DIR/$datetime"".tar"
-    fi
-
-    FILE=`basename $BACKUP_FILE`
-    echo "$FILE" | grep -q '^[a-zA-Z0-9\.]\+$' >>/dev/null
-    if [ $? -ne 0 ]; then
-        skylar_log "ERROR" "Invalid name of backupfile: $BACKUP_FILE"
-        exit 1
-    fi
-
-    echo "$BACKUP_FILE" | grep '.tar' >>/dev/null
-    if [ $? -ne 0 ]; then
-        skylar_log "ERROR" "Invalid name of backupfile: $BACKUP_FILE"
-        exit 1
-    fi
-
-    echo "$BACKUP_FILE" | grep '/backup/container_redis' >>/dev/null
-    if [ $? -ne 0 ]; then
-        skylar_log "ERROR" "Invalid name of backupfile: $BACKUP_FILE"
-        exit 1
-    fi
-
-    if [ -f $BACKUP_FILE ]; then
-        skylar_log "ERROR" "$BACKUP_FILE is exist."
-        exit 1
-    fi
 }
 
 cmd_list() {
@@ -206,7 +178,8 @@ cmd_list() {
 
 # usage: cmd_cleanup [-a|-i index|-f file] 
 cmd_cleanup() {
-    if [ "$BACKUP_BASE_DIR" == "*" ] || [ "$BACKUP_BASE_DIR" == "" ]; then
+    if [ "$BACKUP_BASE_DIR" == "*" ] || 
+       [ "$BACKUP_BASE_DIR" == "" ]; then
         log_error "ERROR. Backup directory is invalid. \
                   BACKUP_BASE_DIR=$BACKUP_BASE_DIR"
         return 1
@@ -370,7 +343,8 @@ restore_main() {
     need_size=`ls -l $BACKUP_FILE | awk '{print $5}'`
     check_space $need_size
     if [ $? -ne 0 ]; then
-        echo "ERROR. There is not enough reserve space to restore. reserve size is $RESERVE_SIZE GB."
+        echo "ERROR. There is not enough reserve space to restore.\
+              reserve size is $RESERVE_SIZE GB."
         return 1
     fi
 
@@ -419,7 +393,8 @@ restore_redis() {
     # step 1. stop redis
     log_info "==> supervisorctl stop redis ..."
     supervisorctl stop redis
-    [ ps -ef | grep redis-server ] && kill -9 $(ps -ef | grep redis-server | grep 6379 | awk '{print $2}') >>/dev/null
+    [ ps -ef | grep redis-server ] && \
+    kill -9 $(ps -ef | grep redis-server | grep 6379 | awk '{print $2}')
 
     # step 2. restore aof
     log_info "==> $AOF_FILE will be used to restore ..."
@@ -450,8 +425,11 @@ restore_pg() {
     PG_AUTO_CONF=`find -P $BACKUP_BASE_DIR/tmp -name "postgresql.auto.conf"`
     PG_IDENT_CONF=`find -P $BACKUP_BASE_DIR/tmp -name "pg_ident.conf"`
 
-    if [ ! -f "$PG_DUMP_FILE" ] || [ ! -f "$PG_CONF_FILE" ] || [ ! -f "$PG_HBA_CONF" ]; then
-        log_error "No such file or directory:$PG_DUMP_FILE or $PG_CONF_FILE or $PG_HBA_CONF."
+    if [ ! -f "$PG_DUMP_FILE" ] || 
+       [ ! -f "$PG_CONF_FILE" ] || 
+       [ ! -f "$PG_HBA_CONF" ]; then
+        log_error "No such file or directory:$PG_DUMP_FILE or \
+                  $PG_CONF_FILE or $PG_HBA_CONF."
         return 1
     fi
 
@@ -477,7 +455,8 @@ restore_pg() {
     sleep 5
     su postgres -c "$PGCTL_BIN -D $PG_DATA_DIR -l logfile stop"
     supervisorctl stop postgres
-    [ ps -ef | grep postgres] && kill -9 $(ps -ef | grep postgres | awk {'print $2'})
+    [ ps -ef | grep postgres] && \
+    kill -9 $(ps -ef | grep postgres | awk {'print $2'})
     
     ### restore config files
     cp $PG_CONF_FILE $PG_DATA_DIR
