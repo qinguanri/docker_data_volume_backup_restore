@@ -16,7 +16,7 @@ _log() { echo "$2"; echo "`date` $1 $2" >> $LOG_FILE }
 
 usage() {
     echo "
-Scripts used to backup or restore a container's data.
+Scripts used to backup or restore a container's data. version: $VERSION
 
 usage:
 
@@ -60,7 +60,11 @@ examples:
 5. sky bakup
 6. sky restore -i 2
 
-see logfile at $LOG_FILE.
+At the same time, you can see logfile at $LOG_FILE.
+
+This script is placed in container's directory: /usr/local/bin/.
+If you want to execute script outside container, the command would be:
+docker exec <container_name> sky backup
 "
     exit 0
 }
