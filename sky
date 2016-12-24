@@ -10,6 +10,8 @@ VERSION="1.0.0"
 log_info()  { _log "INFO" "$1" }
 log_warn()  { _log "WARN" "$1" }
 log_error() { _log "ERROR" "$1" }
+
+LOG_FILE="/var/log/skylar_backup_restore.log"
 _log() { echo "$2"; echo "`date` $1 $2" >> $LOG_FILE }
 
 usage() {
@@ -78,7 +80,6 @@ fi
 
 # global var
 BACKUP_BASE_DIR="/backup/container_$CONTAINER_NAME"
-LOG_FILE="/var/log/skylar_backup_restore.log"
 BACKUP_FILE=""
 INDEX=""
 RESERVE_SIZE=5   # unit GB
@@ -257,7 +258,10 @@ backup_redis() {
     cp -f $REDIS_CONF_FILE $BACKUP_BASE_DIR
 
     cd $BACKUP_BASE_DIR && \
-    tar cvf $BACKUP_FILE appendonly.aof dump.rdb redis.conf --remove-files
+    tar cvf $BACKUP_FILE \
+        appendonly.aof \
+        dump.rdb \
+        redis.conf --remove-files
 }
 
 backup_pg() {
@@ -330,50 +334,41 @@ cmd_restore() {
 }
 
 restore_main() {
-    BACKUP_FILE="$BACKUP_BASE_DIR/$DIRRECTORY/data.tar.gz"
-    if [ ! -e $BACKUP_FILE ]; then
-        echo "ERROR. cannot find backup file: $BACKUP_FILE"
-        return 1
-    fi
-
-    echo "==> $BACKUP_FILE will be used to restore ..."
-
-    need_size=`ls -l $BACKUP_FILE | awk '{print $5}'`
-    check_space $need_size
-    if [ $? -ne 0 ]; then
-        echo "ERROR. There is not enough reserve space to restore.\
-              reserve size is $RESERVE_SIZE GB."
+    SKYLARMINIDE_TMP_DIR="$BACKUP_BASE_DIR/tmp/data"
+    if [ ! -d "$SKYLARMINIDE_TMP_DIR" ]; then
+        log_error "No such file or directory: $SKYLARMINIDE_TMP_DIR"
         return 1
     fi
 
     if [ ! -d $SKYLARMINIDE_DIR ]; then
-        echo "ERROR. cannot find $SKYLARMINIDE_DIR."
+        log_error "ERROR. cannot find $SKYLARMINIDE_DIR."
         return 1
     fi
 
-    echo "==> supervisorctl stop skylarminide ..."
+    log_info "==> supervisorctl stop skylarminide ..."
     supervisorctl stop skylarminide
 
-    echo "==> mv $SKYLARMINIDE_DIR/data $SKYLARMINIDE_DIR/data_old ..."
+    log_info "==> mv $SKYLARMINIDE_DIR/data $SKYLARMINIDE_DIR/data_old ..."
     cp -rf $SKYLARMINIDE_DIR/data $SKYLARMINIDE_DIR/data_old
     rm -rf $SKYLARMINIDE_DIR/data 2>&1 >/dev/null
 
-    echo "mv and tar $BACKUP_FILE"
-    mv $BACKUP_FILE $SKYLARMINIDE_DIR
-    tar xzvf $SKYLARMINIDE_DIR/data.tar.gz >> /dev/null
-
-    echo "==> supervisorctl start skylarminide ..."
-    supervisorctl start skylarminide
-
-    if [ $? -ne 0 ]; then
-        echo "ERROR. supervisorctl start skylarminide failed. rollback."
+    log_info "copy $SKYLARMINIDE_TMP_DIR to $SKYLARMINIDE_DIR ..."
+    [ ! -d $SKYLARMINIDE_DIR/data ] && mkdir -p $SKYLARMINIDE_DIR/data
+    cp -rf SKYLARMINIDE_TMP_DIR/* $SKYLARMINIDE_DIR/data/
+    
+    log_info "==> supervisorctl start skylarminide ..."
+    if ! supervisorctl start skylarminide; then
+        log_error "ERROR. supervisorctl start skylarminide failed. rollback ..."
         supervisorctl stop skylarminide
         rm -rf $SKYLARMINIDE_DIR/data
-        mv $SKYLARMINIDE_DIR/data_old $SKYLARMINIDE_DIR/data
+        [ ! -d $SKYLARMINIDE_DIR/data ] && mkdir -p $SKYLARMINIDE_DIR/data
+        cp -rf $SKYLARMINIDE_DIR/data_old/* $SKYLARMINIDE_DIR/data/
+        rm -rf $SKYLARMINIDE_DIR/data_old
         supervisorctl start skylarminide
         return 1
     fi
 
+    rm -rf $BACKUP_BASE_DIR/tmp
     rm -rf $SKYLARMINIDE_DIR/data_old
     return 0
 }
@@ -482,7 +477,6 @@ restore_pg() {
     rm -rf $PG_DATA_OLD
 }
 
-
 # What kind of command ？
 case "$1" in
     list)           cmd_list $@;;
@@ -494,7 +488,7 @@ case "$1" in
     *)                       usage;;
 esac
 
- if [ $? -eq 0 ]; then
+if [ $? -eq 0 ]; then
     log_info "Done."
     exit 0
 else
