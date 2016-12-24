@@ -38,7 +38,6 @@ backup [-f file]
     -f file     : create a backup file and its absolut path is specify by 'file'.
     default is backup file name by timestamp.
 
-
 restore [-i index|-f file]     
     restore with a backup file at current container
     -i index    : resotre with a backup file specify by index.
@@ -212,6 +211,8 @@ cmd_backup() {
 
     [ ! -d $BACKUP_BASE_DIR ] && mkdir -p "$BACKUP_BASE_DIR"
 
+    log_info "==> ready to backup to $BACKUP_FILE..."
+
     case "$CONTAINER_NAME" in
         main)   backup_main;ret_code=$?;;
         redis)  backup_redis;ret_code=$?;;
@@ -320,6 +321,8 @@ cmd_restore() {
     
     [ -d $BACKUP_BASE_DIR/tmp ] && rm -rf $BACKUP_BASE_DIR/tmp
     mkdir -p $BACKUP_BASE_DIR/tmp
+   
+    log_info "==> ready to use $BACKUP_FILE to restore ..." 
     
     cd $BACKUP_BASE_DIR && \
     tar xvf $BACKUP_FILE -C $BACKUP_BASE_DIR/tmp >>/dev/null
