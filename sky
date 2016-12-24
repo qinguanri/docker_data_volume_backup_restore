@@ -127,11 +127,10 @@ if [ "$CONTAINER_NAME" == "pg" ]; then
 
 fi
 
-## check_space $need_size. unit Bytes. 
+## check_space $need_size. unit MBytes. 
 ## return 0 if free space is enough, else return 1.
 check_space() {
     log_info "==> check space ..."
-
     need_size=0
     if [ "$1" -gt 0 ]; then
         need_size=$1
@@ -144,22 +143,17 @@ check_space() {
         total_free_size=`df | grep '/dev/mapper/docker' | awk '{print $4}'`
     fi
 
-    let total_free_size=$total_free_size*1024
+    let total_free_size=$total_free_size/1024  # MB
     let free_size=$total_free_size-$need_size
-    let reserve_bytes=$RESERVE_SIZE*1024*1024
-
-    let total_free_size_MB=$total_free_size/1024/1024
-    let need_size_MB=$need_size/1024/1024
-    let free_size_MB=$free_size/1024/1024
-    let reserve_size_MB=$reserve_bytes/1024/1024
+    let reserve_size=$RESERVE_SIZE*1024       # MB
 
     log_info "==> compute space size ..."
-    log_info "total_free_size=$total_free_size_MB MBytes."
-    log_info "need_size=$need_size_MB MBytes."
-    log_info "free_size=$free_size_MB MBytes."
-    log_info "reserve_size=$reserve_size_MB MBytes."
+    log_info "total_free_size=$total_free_size MBytes."
+    log_info "need_size=$need_size MBytes."
+    log_info "free_size=$free_size MBytes."
+    log_info "reserve_size=$reserve_bytes MBytes."
 
-    if [ $free_size -lt $reserve_bytes ]; then
+    if [ $free_size -lt $reserve_size ]; then
         log_error "There is not enough reserve space. \
                   Reserve size is $RESERVE_SIZE GB." 
         return 1
@@ -235,7 +229,7 @@ backup_main() {
     supervisorctl stop skylarminide
 
     # check space before backup. 1GB
-    [ ! check_space 1000000000 ] && return 1
+    [ ! check_space 1000 ] && return 1
 
     # BACKUP_FILE="/backup/container_main/xxxxx.tar"
     # SOURCE=/opt/tools/skylarminide/data
@@ -255,6 +249,7 @@ backup_redis() {
     fi
 
     aof_size=`ls -l $REDIS_AOF_FILE | awk '{print $5}'`
+    let aof_size＝$aof_size/1024/1024
     [ ! check_space $aof_size ] && return 1
 
     cp -f $REDIS_AOF_FILE $BACKUP_BASE_DIR
@@ -272,7 +267,7 @@ backup_pg() {
     [ ! supervisorctl status postgres ] && supervisorctl start postgres
 
     # todo:I guess need 2GB space to tar dump.sql here
-    [ ! check_space 2000000000 ] && return 1
+    [ ! check_space 2000 ] && return 1
 
     log_info "==> pg_dumpall > $PG_DUMP_FILE ..."
     [ ! su postgres -c "pg_dumpall > $PG_DUMP_FILE" ] && return 1
@@ -318,6 +313,7 @@ cmd_restore() {
     fi
 
     size=`ls -l $BACKUP_FILE | awk '{print $5}'`
+    let size=$size/1024/1024
     [ ! check_space $size ] && return 1
     
     [ -d $BACKUP_BASE_DIR/tmp ] && rm -rf $BACKUP_BASE_DIR/tmp
