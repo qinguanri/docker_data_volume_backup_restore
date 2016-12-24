@@ -53,10 +53,8 @@ help|-h|--help
 examples:
 1. sky list 
 2. sky clean
-3. sky clean -a
-4. sky backup -f /backup/container_redis/uuid_123.tar
-5. sky bakup
-6. sky restore -i 2
+3. sky backup -f /backup/container_redis/uuid_123.tar
+4. sky restore -i 2
 
 At the same time, you can see logfile at $LOG_FILE.
 
@@ -95,13 +93,12 @@ fi
 #/////////////////////////////////////////////////
 # global var for container 'redis'
 if [ "$CONTAINER_NAME" == "redis" ]; then
+    REDIS_RDB_FILE="/var/lib/redis/dump.rdb"
+    REDIS_CONF_FILE="/var/lib/redis/redis.conf"
     REDIS_AOF_FILE="/var/lib/redis/appendonly.aof"
     REDIS_AOF_FILE_OLD="/var/lib/redis/appendonly.aof.old"
 
-    BACKUP_FILE=""
     AOF_FILE=""
-    REDIS_RDB_FILE="/var/lib/redis/dump.rdb"
-    REDIS_CONF_FILE="/var/lib/redis/redis.conf"
 
     REDIS_CLI=`which redis-cli`
 fi
@@ -111,6 +108,7 @@ fi
 if [ "$CONTAINER_NAME" == "pg" ]; then
     INITDB_BIN=`find -P /usr/lib/postgresql/ -name "initdb"`
     PG_CTL_BIN=`find -P /usr/lib/postgresql/ -name "pg_ctl"`
+    
     PG_VER=`ls -l /var/lib/postgresql`
     if [ "$PG_VER" == "" ]; then
         log_error "unexpected postgresql version:$PG_VER"
@@ -125,7 +123,6 @@ if [ "$CONTAINER_NAME" == "pg" ]; then
     PG_AUTO_CONF=`find -P /var/lib/postgresql -name "postgresql.auto.conf"`
     PG_IDENT_CONF=`find -P /var/lib/postgresql -name "pg_ident.conf"`
     PG_HBA_CONF=`find -P /var/lib/postgresql -name "pg_hba.conf"`
-
 fi
 
 ## check_space $need_size. unit MBytes. 
@@ -149,10 +146,10 @@ check_space() {
     let reserve_size=$RESERVE_SIZE*1024        # MB
 
     log_info "==> compute space size ..."
-    log_info "total_free_size=$total_free_size MBytes."
-    log_info "need_size=$need_size MBytes."
-    log_info "free_size=$free_size MBytes."
-    log_info "reserve_size=$reserve_bytes MBytes."
+    log_info "total_free_size   = $total_free_size MBytes."
+    log_info "need_size         = $need_size MBytes."
+    log_info "free_size         = $free_size MBytes."
+    log_info "reserve_size      = $reserve_bytes MBytes."
 
     if [ $free_size -lt $reserve_size ]; then
         log_error "There is not enough reserve space. \
@@ -196,8 +193,6 @@ cmd_backup() {
         BACKUP_FILE="$2"
     fi
 
-    FILE=`basename $BACKUP_FILE`
-
     basename "$BACKUP_FILE" | grep -q '^/backup/[a-zA-Z0-9\.]\+.tar$' >>/dev/null
     if [ $? -ne 0 ]; then
         log_error "Invalid argumnets. backupfile: $BACKUP_FILE"
@@ -232,7 +227,7 @@ backup_main() {
     supervisorctl stop skylarminide
 
     # check space before backup. 1GB
-    [ ! check_space 1000 ] && return 1
+    [ ! check_space 1024 ] && return 1
 
     # BACKUP_FILE="/backup/container_main/xxxxx.tar"
     # SOURCE=/opt/tools/skylarminide/data
@@ -270,18 +265,17 @@ backup_pg() {
     [ ! supervisorctl status postgres ] && supervisorctl start postgres
 
     # todo:I guess need 2GB space to tar dump.sql here
-    [ ! check_space 2000 ] && return 1
+    [ ! check_space 2048 ] && return 1
 
     log_info "==> pg_dumpall > $PG_DUMP_FILE ..."
     [ ! su postgres -c "pg_dumpall > $PG_DUMP_FILE" ] && return 1
 
-    
     mv -f $PG_DUMP_FILE $BACKUP_BASE_DIR
     cp -f $PG_CONF $BACKUP_BASE_DIR
     cp -f $PG_HBA_CONF $BACKUP_BASE_DIR
     cp -f $PG_AUTO_CONF $BACKUP_BASE_DIR
     cp -f $PG_IDENT_CONF $BACKUP_BASE_DIR
-    cd $BACKUP_BASE_DIR && 
+    cd $BACKUP_BASE_DIR && \
     tar cvf $BACKUP_FILE \
         dump.sql \
         postgresql.conf \
@@ -364,7 +358,7 @@ restore_main() {
     log_info "==> supervisorctl start skylarminide ..."
     if ! supervisorctl start skylarminide; then
         log_error "ERROR. supervisorctl start skylarminide failed. rollback ..."
-        supervisorctl stop skylarminide
+
         rm -rf $SKYLARMINIDE_DIR/data
         [ ! -d $SKYLARMINIDE_DIR/data ] && mkdir -p $SKYLARMINIDE_DIR/data
         cp -rf $SKYLARMINIDE_DIR/data_old/* $SKYLARMINIDE_DIR/data/
@@ -423,8 +417,7 @@ restore_pg() {
     PG_AUTO_CONF=`find -P $BACKUP_BASE_DIR/tmp -name "postgresql.auto.conf"`
     PG_IDENT_CONF=`find -P $BACKUP_BASE_DIR/tmp -name "pg_ident.conf"`
 
-    if [ ! -f "$PG_DUMP_FILE" ] || 
-       [ ! -f "$PG_CONF_FILE" ] || 
+    if [ ! -f "$PG_DUMP_FILE" ] || [ ! -f "$PG_CONF_FILE" ] || \
        [ ! -f "$PG_HBA_CONF" ]; then
         log_error "No such file or directory:$PG_DUMP_FILE or \
                   $PG_CONF_FILE or $PG_HBA_CONF."
@@ -450,12 +443,12 @@ restore_pg() {
     chmod -R 700 $PG_DATA_DIR
 
     su postgres -c "$INITDB_BIN -D $PG_DATA_DIR"
-    sleep 5
+    sleep 2
     su postgres -c "$PGCTL_BIN -D $PG_DATA_DIR -l logfile stop"
     supervisorctl stop postgres
     [ ps -ef | grep postgres] && \
     kill -9 $(ps -ef | grep postgres | awk {'print $2'})
-    
+
     ### restore config files
     cp $PG_CONF_FILE $PG_DATA_DIR
     cp $PG_HBA_CONF $PG_DATA_DIR
