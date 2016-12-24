@@ -168,7 +168,7 @@ cmd_list() {
 
     cd $BACKUP_BASE_DIR
     ls -lth --time-style="+%Y-%m-%d %H:%M:%S" | sed '1d' | \
-    awk '{printf("%5d %10s %9s%9s %s/%s\n", NR, $5, $6, $7, $CONTAINER_NAME, $8)}'
+    awk '{printf("%5d %10s %9s%9s %s/%s\n", NR, $5, $6, $7, $BACKUP_BASE_DIR, $8)}'
 }
 
 # usage: cmd_cleanup [-a|-i index|-f file] 
