@@ -87,12 +87,14 @@ BACKUP_FILE=""
 INDEX=""
 RESERVE_SIZE=5   # unit GB
 
-# ------- global var for container 'main'
+#/////////////////////////////////////////////////
+# global var for container 'main'
 if [ "$CONTAINER_NAME" == "main" ]; then 
     SKYLARMINIDE_DIR="/opt/tools/skylarminide"
 fi
 
-# ------- global var for container 'redis'
+#/////////////////////////////////////////////////
+# global var for container 'redis'
 if [ "$CONTAINER_NAME" == "redis" ]; then
     REDIS_AOF_FILE="/var/lib/redis/appendonly.aof"
     REDIS_AOF_FILE_OLD="/var/lib/redis/appendonly.aof.old"
@@ -105,7 +107,8 @@ if [ "$CONTAINER_NAME" == "redis" ]; then
     REDIS_CLI=`which redis-cli`
 fi
 
-# ------- global var for container 'postgresql'
+#////////////////////////////////////////////////
+# global var for container 'postgresql'
 if [ "$CONTAINER_NAME" == "pg" ]; then
     INITDB_BIN=`find -P /usr/lib/postgresql/ -name "initdb"`
     PG_CTL_BIN=`find -P /usr/lib/postgresql/ -name "pg_ctl"`
@@ -143,8 +146,8 @@ check_space() {
     fi
 
     let total_free_size=$total_free_size/1024  # MB
-    let free_size=$total_free_size-$need_size
-    let reserve_size=$RESERVE_SIZE*1024       # MB
+    let free_size=$total_free_size-$need_size  # MB
+    let reserve_size=$RESERVE_SIZE*1024        # MB
 
     log_info "==> compute space size ..."
     log_info "total_free_size=$total_free_size MBytes."
