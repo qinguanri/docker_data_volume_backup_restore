@@ -466,7 +466,7 @@ restore_pg() {
 
     # step 5. succeed or rollback.
     if ! supervisorctl status postgres; then
-        skylar_log "ERROR" "restore failed. rollback ..."
+        log_error "restore failed. rollback ..."
         [ -d $PG_DATA_DIR ] && rm -rf $PG_DATA_DIR
         mv $PG_DATA_OLD $PG_DATA_DIR
 
