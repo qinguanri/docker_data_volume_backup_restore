@@ -71,7 +71,7 @@ At the same time, you can see logfile at $LOG_FILE.
 
 This script is placed in container's directory: /usr/local/bin/.
 If you want to execute script outside container, the command would be:
-docker exec <container_name> sky backup
+docker exec <container_name> sky <command> [options]
 "
     exit 0
 }
