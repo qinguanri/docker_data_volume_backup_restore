@@ -26,13 +26,13 @@ _log() {
 
 #usage: exit_error <error_info>
 exit_error() {
-    _log "ERROR" "$1"
-    _log "ERROR" "Failed."
+    [ "$1" != "" ] && log_error "$1"
+    log_error "Failed."
     exit 1
 }
 
 exit_ok() {
-    _log "INFO" "Done."
+    log_info "Done."
     exit 0
 }
 
@@ -157,7 +157,6 @@ check_space() {
         need_size=$1
     fi
 
-    cd /
     total_free_size=`df --block-size=M /backup| tail -1 | awk '{print $4}'`
 
     let free_size=$total_free_size-$need_size  # MB
@@ -244,7 +243,7 @@ backup_main() {
     supervisorctl stop skylarminide
 
     # check space before backup. 1GB
-    [ ! check_space 1024 ] && return 1
+    [ ! check_space 1024 ] && exit_error
 
     # BACKUP_FILE="/backup/container_main/xxxxx.tar"
     # SOURCE=/opt/tools/skylarminide/data
@@ -265,7 +264,7 @@ backup_redis() {
 
     aof_size=`ls -l $REDIS_AOF_FILE | awk '{print $5}'`
     let aof_size＝$aof_size/1024/1024
-    [ ! check_space $aof_size ] && return 1
+    [ ! check_space $aof_size ] && exit_error
 
     cp -f $REDIS_AOF_FILE $BACKUP_BASE_DIR
     cp -f $REDIS_RDB_FILE $BACKUP_BASE_DIR
@@ -282,7 +281,9 @@ backup_pg() {
     [ ! supervisorctl status postgres ] && supervisorctl start postgres
 
     # todo:I guess need 2GB space to tar dump.sql here
-    [ ! check_space 2048 ] && return 1
+    data_size=`du -s $PG_DATA_DIR --block-size=M | awk '{print $4}'`
+    let dump_size=$data_size/10             # dump.sql is about 1/10 of data directory's size
+    [ ! check_space $dump_size ] && exit_error
 
     log_info "==> pg_dumpall > $PG_DUMP_FILE ..."
     [ ! su postgres -c "pg_dumpall > $PG_DUMP_FILE" ] && return 1
@@ -331,9 +332,7 @@ prepare_restore() {
 
     size=`ls -l $BACKUP_FILE | awk '{print $5}'`
     let size=$size/1024/1024
-    if ! check_space $size; then
-        exit_error "There is not enough space."
-    fi
+    [ ! check_space $size ] && exit_error
 
     # step 3. untar and copy backup file to a temp directory.
     [ -d $BACKUP_BASE_DIR/tmp ] && rm -rf $BACKUP_BASE_DIR/tmp
