@@ -232,8 +232,9 @@ backup_main() {
     log_info "==> supervisorctl stop skylarminide ..."
     supervisorctl stop skylarminide
 
-    # check space before backup. 1GB
-    [ ! check_space 1024 ] && return 1
+    # check space before backup. 
+    need_size=`du -s --block-size=M $SKYLARMINIDE_DIR/data | awk {'print $1'}`
+    [ ! check_space $need_size ] && return 1
 
     # BACKUP_FILE="/backup/container_main/xxxxx.tar"
     # SOURCE=/opt/tools/skylarminide/data
