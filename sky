@@ -27,8 +27,13 @@ _log() {
 #usage: exit_error <error_info>
 exit_error() {
     _log "ERROR" "$1"
-    _log "ERROR" "failed."
+    _log "ERROR" "Failed."
     exit 1
+}
+
+exit_ok() {
+    _log "INFO" "Done."
+    exit 0
 }
 
 usage() {
@@ -185,7 +190,7 @@ cmd_list() {
 }
 
 # usage: cmd_cleanup [-a|-i index|-f file] 
-cmd_cleanup() {
+execute_cleanup() {
     if [ "$BACKUP_BASE_DIR" == "*" ] || 
        [ "$BACKUP_BASE_DIR" == "" ]; then
         log_error "ERROR. Backup directory is invalid. \
@@ -197,8 +202,8 @@ cmd_cleanup() {
     rm -rf $BACKUP_BASE_DIR
 }
 
-# usage: cmd_backup [-f file]
-cmd_backup() {
+# usage: prepare_backup [-f file]
+prepare_backup() {
     log_info "==> begin to backup $CONTAINER_NAME ..."
     if [ $# -eq 0 ]; then
         BACKUP_FILE="$BACKUP_BASE_DIR/`date +%Y%m%d%H%M%S`"
@@ -208,26 +213,25 @@ cmd_backup() {
 
     basename "$BACKUP_FILE" | grep -q '^/backup/[a-zA-Z0-9\.]\+.tar$' >>/dev/null
     if [ $? -ne 0 ]; then
-        log_error "Invalid argumnets. backupfile: $BACKUP_FILE"
-        return 1
+        exit_error "Invalid argumnets. backupfile: $BACKUP_FILE"
     fi
 
-    if [ -f $BACKUP_FILE ]; then
-        log_error "Invalid argumnets. $BACKUP_FILE is already exist."
-        return 1
-    fi
+    [ -f $BACKUP_FILE ] && exit_error "Invalid argumnets. $BACKUP_FILE is already exist."
 
     [ ! -d $BACKUP_BASE_DIR ] && mkdir -p "$BACKUP_BASE_DIR"
+}
 
-    log_info "==> ready to backup to $BACKUP_FILE..."
-
+# usage: cmd_backup [-f file]
+execute_backup() {
     case "$CONTAINER_NAME" in
         main)   backup_main;ret_code=$?;;
         redis)  backup_redis;ret_code=$?;;
         pg)     backup_pg;ret_code=$?;;
-        *)      log_error "unexpected container name";exit 1;;
+        *)      exit_error "unexpected container name";exit 1;;
     esac
-    return $ret_code
+    if [ $ret_code -ne 0 ]; then
+        exit_error "execute backup failed."
+    fi
 }
 
 backup_main() {
@@ -498,30 +502,39 @@ summary_restore() {
     [ -d "$BACKUP_BASE_DIR/tmp" ] && rm -rf $BACKUP_BASE_DIR/tmp
 }
 
+cmd_list() {
+    execute_list $@
+}
+
+cmd_cleanup() {
+    execute_cleanup $@
+}
+
+cmd_backup() {
+    prepare_backup $@
+    execute_backup
+    summary_backup
+}
+
+cmd_restore() {
+    prepare_restore $@
+    execute_restore
+    summary_restore
+}
+
 # What kind of command ？
 case "$1" in
     list)           cmd_list $@;;
-    
     cleanup)        cmd_cleanup $@;;
-    
-    backup)         prepare_backup $@
-                    execute_backup
-                    summary_backup
-
-    restore)        prepare_restore $@
-                    execute_restore
-                    summary_restore;; 
-    
+    backup)         cmd_backup $@;;
+    restore)        cmd_restore $@;;   
     version|-V|--version)    echo "version: $VERSION";;
-    
     help|usage|-h|--help)    usage;;
     *)                       usage;;
 esac
 
 if [ $? -eq 0 ]; then
-    log_info "Done."
-    exit 0
+    exit_ok
 else
-    log_error "Failed."
-    exit 1
+    exit_error
 fi
