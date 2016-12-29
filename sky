@@ -140,19 +140,14 @@ fi
 ## return 0 if free space is enough, else return 1.
 check_space() {
     log_info "==> check space ..."
-    need_size=0
+    need_size=1
     if [ "$1" -gt 0 ]; then
         need_size=$1
     fi
 
     cd /
-    total_free_size=`df | grep '/dev/mapper/docker' | awk '{print $4}'`
-    df | grep '/etc/hosts' >>/dev/null
-    if [ $? -eq 0 ]; then
-        total_free_size=`df | grep '/dev/mapper/docker' | awk '{print $4}'`
-    fi
+    total_free_size=`df --block-size=M /backup| tail -1 | awk '{print $4}'`
 
-    let total_free_size=$total_free_size/1024  # MB
     let free_size=$total_free_size-$need_size  # MB
     let reserve_size=$RESERVE_SIZE*1024        # MB
 
@@ -160,7 +155,7 @@ check_space() {
     log_info "total_free_size   = $total_free_size MBytes."
     log_info "need_size         = $need_size MBytes."
     log_info "free_size         = $free_size MBytes."
-    log_info "reserve_size      = $reserve_bytes MBytes."
+    log_info "reserve_size      = $reserve_size MBytes."
 
     if [ $free_size -lt $reserve_size ]; then
         log_error "There is not enough reserve space. \
