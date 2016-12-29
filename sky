@@ -24,6 +24,13 @@ _log() {
     echo "$2"; echo "`date` $1 $2" >> $LOG_FILE 
 }
 
+#usage: exit_error <error_info>
+exit_error() {
+    _log "ERROR" "$1"
+    _log "ERROR" "failed."
+    exit 1
+}
+
 usage() {
     echo "
 Scripts used to backup or restore a container's data. version: $VERSION
@@ -292,9 +299,12 @@ backup_pg() {
     return 0
 }
 
-# restore [-i index|-f file]
-cmd_restore() {
+# prepare_restore [-i index|-f file]
+
+prepare_restore() {
     log_info "==> begin to restore $CONTAINER_NAME ..."
+
+    # step 1. parse arguments.
     if [ $# -eq 0 ]; then
         INDEX=1
     elif [ $# -eq 2 ]; then
@@ -310,44 +320,46 @@ cmd_restore() {
         BACKUP_FILE="$BACKUP_BASE_DIR/$FILE"
     fi
 
+    # step 2. check files and space
     if [ ! -f "$BACKUP_FILE" ]; then
-        log_error "No such file or directory: $BACKUP_FILE."
-        return 1
+        exit_error "No such file or directory: $BACKUP_FILE."
     fi
 
     size=`ls -l $BACKUP_FILE | awk '{print $5}'`
     let size=$size/1024/1024
-    [ ! check_space $size ] && return 1
-    
+    if ! check_space $size; then
+        exit_error "There is not enough space."
+    fi
+
+    # step 3. untar and copy backup file to a temp directory.
     [ -d $BACKUP_BASE_DIR/tmp ] && rm -rf $BACKUP_BASE_DIR/tmp
     mkdir -p $BACKUP_BASE_DIR/tmp
-   
+
     log_info "==> ready to use $BACKUP_FILE to restore ..." 
     
     cd $BACKUP_BASE_DIR && \
     tar xvf $BACKUP_FILE -C $BACKUP_BASE_DIR/tmp >>/dev/null
+    return 0
+}
 
+execute_restore() {
     case "$CONTAINER_NAME" in
         main)           restore_main;ret_code=$?;;
         redis)          restore_redis;ret_code=$?;;
         pg)             restore_pg;ret_code=$?;;
-        *)              log_error "unexpected container name";exit 1;
+        *)              exit_error "unexpected container name";;
     esac
-
-    [ -d "$BACKUP_BASE_DIR/tmp" ] && rm -rf $BACKUP_BASE_DIR/tmp
     return $ret_code
 }
 
 restore_main() {
     SKYLARMINIDE_TMP_DIR="$BACKUP_BASE_DIR/tmp/data"
     if [ ! -d "$SKYLARMINIDE_TMP_DIR" ]; then
-        log_error "No such file or directory: $SKYLARMINIDE_TMP_DIR"
-        return 1
+        exit_error "No such file or directory: $SKYLARMINIDE_TMP_DIR"
     fi
 
     if [ ! -d $SKYLARMINIDE_DIR ]; then
-        log_error "ERROR. cannot find $SKYLARMINIDE_DIR."
-        return 1
+        exit_error "ERROR. cannot find $SKYLARMINIDE_DIR."
     fi
 
     log_info "==> supervisorctl stop skylarminide ..."
@@ -481,13 +493,27 @@ restore_pg() {
     rm -rf $PG_DATA_OLD
 }
 
+# do some common works after restoring
+summary_restore() {
+    [ -d "$BACKUP_BASE_DIR/tmp" ] && rm -rf $BACKUP_BASE_DIR/tmp
+}
+
 # What kind of command ？
 case "$1" in
     list)           cmd_list $@;;
+    
     cleanup)        cmd_cleanup $@;;
-    backup)         cmd_backup $@;;
-    restore)        cmd_restore $@;; 
+    
+    backup)         prepare_backup $@
+                    execute_backup
+                    summary_backup
+
+    restore)        prepare_restore $@
+                    execute_restore
+                    summary_restore;; 
+    
     version|-V|--version)    echo "version: $VERSION";;
+    
     help|usage|-h|--help)    usage;;
     *)                       usage;;
 esac
