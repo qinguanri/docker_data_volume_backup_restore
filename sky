@@ -345,14 +345,13 @@ prepare_restore() {
     return 0
 }
 
-execute_restore() {
-    case "$CONTAINER_NAME" in
-        main)           restore_main;ret_code=$?;;
-        redis)          restore_redis;ret_code=$?;;
-        pg)             restore_pg;ret_code=$?;;
-        *)              exit_error "unexpected container name";;
+execute_cmd() {
+    cmd=$1
+    case "$cmd" in
+        backup)         "backup_$CONTAINER_NAME";;
+        restore)        "restore_$CONTAINER_NAME";;
     esac
-    return $ret_code
+    return $?
 }
 
 restore_main() {
