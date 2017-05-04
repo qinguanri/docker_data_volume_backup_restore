@@ -24,6 +24,18 @@ _log() {
     echo "$2"; echo "`date` $1 $2" >> $LOG_FILE 
 }
 
+#usage: exit_error <error_info>
+exit_error() {
+    [ "$1" != "" ] && log_error "$1"
+    log_error "Failed."
+    exit 1
+}
+
+exit_ok() {
+    log_info "Done."
+    exit 0
+}
+
 usage() {
     echo "
 Scripts used to backup or restore a container's data. version: $VERSION
@@ -145,7 +157,6 @@ check_space() {
         need_size=$1
     fi
 
-    cd /
     total_free_size=`df --block-size=M /backup| tail -1 | awk '{print $4}'`
 
     let free_size=$total_free_size-$need_size  # MB
@@ -178,7 +189,7 @@ cmd_list() {
 }
 
 # usage: cmd_cleanup [-a|-i index|-f file] 
-cmd_cleanup() {
+execute_cleanup() {
     if [ "$BACKUP_BASE_DIR" == "*" ] || 
        [ "$BACKUP_BASE_DIR" == "" ]; then
         log_error "ERROR. Backup directory is invalid. \
@@ -190,8 +201,8 @@ cmd_cleanup() {
     rm -rf $BACKUP_BASE_DIR
 }
 
-# usage: cmd_backup [-f file]
-cmd_backup() {
+# usage: prepare_backup [-f file]
+prepare_backup() {
     log_info "==> begin to backup $CONTAINER_NAME ..."
     if [ $# -eq 0 ]; then
         BACKUP_FILE="$BACKUP_BASE_DIR/`date +%Y%m%d%H%M%S`"
@@ -201,26 +212,25 @@ cmd_backup() {
 
     basename "$BACKUP_FILE" | grep -q '^/backup/[a-zA-Z0-9\.]\+.tar$' >>/dev/null
     if [ $? -ne 0 ]; then
-        log_error "Invalid argumnets. backupfile: $BACKUP_FILE"
-        return 1
+        exit_error "Invalid argumnets. backupfile: $BACKUP_FILE"
     fi
 
-    if [ -f $BACKUP_FILE ]; then
-        log_error "Invalid argumnets. $BACKUP_FILE is already exist."
-        return 1
-    fi
+    [ -f $BACKUP_FILE ] && exit_error "Invalid argumnets. $BACKUP_FILE is already exist."
 
     [ ! -d $BACKUP_BASE_DIR ] && mkdir -p "$BACKUP_BASE_DIR"
+}
 
-    log_info "==> ready to backup to $BACKUP_FILE..."
-
+# usage: cmd_backup [-f file]
+execute_backup() {
     case "$CONTAINER_NAME" in
         main)   backup_main;ret_code=$?;;
         redis)  backup_redis;ret_code=$?;;
         pg)     backup_pg;ret_code=$?;;
-        *)      log_error "unexpected container name";exit 1;;
+        *)      exit_error "unexpected container name";exit 1;;
     esac
-    return $ret_code
+    if [ $ret_code -ne 0 ]; then
+        exit_error "execute backup failed."
+    fi
 }
 
 backup_main() {
@@ -235,6 +245,8 @@ backup_main() {
     # check space before backup. 
     need_size=`du -s --block-size=M $SKYLARMINIDE_DIR/data | awk {'print $1'}`
     [ ! check_space $need_size ] && return 1
+    # check space before backup. 1GB
+    [ ! check_space 1024 ] && exit_error
 
     # BACKUP_FILE="/backup/container_main/xxxxx.tar"
     # SOURCE=/opt/tools/skylarminide/data
@@ -255,7 +267,7 @@ backup_redis() {
 
     aof_size=`ls -l $REDIS_AOF_FILE | awk '{print $5}'`
     let aof_size＝$aof_size/1024/1024
-    [ ! check_space $aof_size ] && return 1
+    [ ! check_space $aof_size ] && exit_error
 
     cp -f $REDIS_AOF_FILE $BACKUP_BASE_DIR
     cp -f $REDIS_RDB_FILE $BACKUP_BASE_DIR
@@ -272,7 +284,9 @@ backup_pg() {
     [ ! supervisorctl status postgres ] && supervisorctl start postgres
 
     # todo:I guess need 2GB space to tar dump.sql here
-    [ ! check_space 2048 ] && return 1
+    data_size=`du -s $PG_DATA_DIR --block-size=M | awk '{print $4}'`
+    let dump_size=$data_size/10             # dump.sql is about 1/10 of data directory's size
+    [ ! check_space $dump_size ] && exit_error
 
     log_info "==> pg_dumpall > $PG_DUMP_FILE ..."
     [ ! su postgres -c "pg_dumpall > $PG_DUMP_FILE" ] && return 1
@@ -293,9 +307,12 @@ backup_pg() {
     return 0
 }
 
-# restore [-i index|-f file]
-cmd_restore() {
+# prepare_restore [-i index|-f file]
+
+prepare_restore() {
     log_info "==> begin to restore $CONTAINER_NAME ..."
+
+    # step 1. parse arguments.
     if [ $# -eq 0 ]; then
         INDEX=1
     elif [ $# -eq 2 ]; then
@@ -311,44 +328,43 @@ cmd_restore() {
         BACKUP_FILE="$BACKUP_BASE_DIR/$FILE"
     fi
 
+    # step 2. check files and space
     if [ ! -f "$BACKUP_FILE" ]; then
-        log_error "No such file or directory: $BACKUP_FILE."
-        return 1
+        exit_error "No such file or directory: $BACKUP_FILE."
     fi
 
     size=`ls -l $BACKUP_FILE | awk '{print $5}'`
     let size=$size/1024/1024
-    [ ! check_space $size ] && return 1
-    
+    [ ! check_space $size ] && exit_error
+
+    # step 3. untar and copy backup file to a temp directory.
     [ -d $BACKUP_BASE_DIR/tmp ] && rm -rf $BACKUP_BASE_DIR/tmp
     mkdir -p $BACKUP_BASE_DIR/tmp
-   
+
     log_info "==> ready to use $BACKUP_FILE to restore ..." 
     
     cd $BACKUP_BASE_DIR && \
     tar xvf $BACKUP_FILE -C $BACKUP_BASE_DIR/tmp >>/dev/null
+    return 0
+}
 
-    case "$CONTAINER_NAME" in
-        main)           restore_main;ret_code=$?;;
-        redis)          restore_redis;ret_code=$?;;
-        pg)             restore_pg;ret_code=$?;;
-        *)              log_error "unexpected container name";exit 1;
+execute_cmd() {
+    cmd=$1
+    case "$cmd" in
+        backup)         "backup_$CONTAINER_NAME";;
+        restore)        "restore_$CONTAINER_NAME";;
     esac
-
-    [ -d "$BACKUP_BASE_DIR/tmp" ] && rm -rf $BACKUP_BASE_DIR/tmp
-    return $ret_code
+    return $?
 }
 
 restore_main() {
     SKYLARMINIDE_TMP_DIR="$BACKUP_BASE_DIR/tmp/data"
     if [ ! -d "$SKYLARMINIDE_TMP_DIR" ]; then
-        log_error "No such file or directory: $SKYLARMINIDE_TMP_DIR"
-        return 1
+        exit_error "No such file or directory: $SKYLARMINIDE_TMP_DIR"
     fi
 
     if [ ! -d $SKYLARMINIDE_DIR ]; then
-        log_error "ERROR. cannot find $SKYLARMINIDE_DIR."
-        return 1
+        exit_error "ERROR. cannot find $SKYLARMINIDE_DIR."
     fi
 
     log_info "==> supervisorctl stop skylarminide ..."
@@ -482,21 +498,44 @@ restore_pg() {
     rm -rf $PG_DATA_OLD
 }
 
+# do some common works after restoring
+summary_restore() {
+    [ -d "$BACKUP_BASE_DIR/tmp" ] && rm -rf $BACKUP_BASE_DIR/tmp
+}
+
+cmd_list() {
+    execute_list $@
+}
+
+cmd_cleanup() {
+    execute_cleanup $@
+}
+
+cmd_backup() {
+    prepare_backup $@
+    execute_backup
+    summary_backup
+}
+
+cmd_restore() {
+    prepare_restore $@
+    execute_restore
+    summary_restore
+}
+
 # What kind of command ？
 case "$1" in
     list)           cmd_list $@;;
     cleanup)        cmd_cleanup $@;;
     backup)         cmd_backup $@;;
-    restore)        cmd_restore $@;; 
+    restore)        cmd_restore $@;;   
     version|-V|--version)    echo "version: $VERSION";;
     help|usage|-h|--help)    usage;;
     *)                       usage;;
 esac
 
 if [ $? -eq 0 ]; then
-    log_info "Done."
-    exit 0
+    exit_ok
 else
-    log_error "Failed."
-    exit 1
+    exit_error
 fi
