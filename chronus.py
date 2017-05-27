@@ -8,6 +8,7 @@ import os
 import argparse
 import subprocess
 import traceback
+import hashlib
 import json
 import codecs
 import re
@@ -20,6 +21,7 @@ LOGGING_FMT = '%(module)s[%(process)d]:%(levelname)s:%(message)s'
 
 # Record backup meta data at a json file.
 BACKUP_JSON_FILE = '/var/local/backuplist.json'
+HISTORY_JSON_FILE = '/var/local/backuphistory.json'
 
 
 def do_cmd(cmd, **kwargs):
@@ -33,13 +35,35 @@ def do_cmd(cmd, **kwargs):
     return p.communicate()
 
 
-def dump_backup_list(backuplist, filename):
+def get_pg_version(dir):
+    res, _ = do_cmd(['find', dir, '-name', 'PG_VERSION'])
+    filename = res.split('\n')[0]
+    if os.path.isfile(filename):
+        with open(filename, 'r') as file:
+            pg_version = file.read().strip()
+            return pg_version
+    else:
+        return ""
+
+
+def md5_checksum(filename, block_size=64 * 1024):
+    md5 = hashlib.md5()
+    with open(filename, 'rb') as f:
+        while True:
+            data = f.read(block_size)
+            if not data:
+                break
+            md5.update(data)
+    return md5.hexdigest()
+
+
+def write_data(data, filename):
     with codecs.open(filename, 'w+', 'utf8') as file:
-        file.write(json.dumps(backuplist, ensure_ascii=False))
+        file.write(json.dumps(data, ensure_ascii=False))
     return True
 
 
-def load_backup_list(filename):
+def read_data(filename):
     try:
         with open(filename) as json_data:
             return json.load(json_data)
@@ -47,27 +71,62 @@ def load_backup_list(filename):
         return []
 
 
-def is_volume_active(volume):
+def dump_backup_list(backuplist, filename):
+    return write_data(backuplist, filename)
+
+
+def load_backup_list(filename):
+    return read_data(filename)
+
+
+def dump_history(history, filename):
+    history = sorted(history, key=lambda item: item['timestamp'])
+    return write_data(history[-100:], filename)
+
+
+def load_history(filename):
+    return read_data(filename)
+
+
+def is_snapshot_active(volume):
     res, err = do_cmd(['lvdisplay', volume])
+    return re.search('LV snapshot status.+active', res)
+
+
+def is_lv_path(path):
+    res, _ = do_cmd(['lvdisplay', path])
     return re.search('LV Status.+available', res)
 
 
+def is_dir_path(path):
+    return os.path.isdir(path)
+
+
 def stop_service():
-    # do_cmd(['systemctl', 'stop', 'docker'])
-    pass
+    # TODO: stop your services below
+    do_cmd(['docker', 'stop', 'main'])
+    do_cmd(['docker', 'stop', 'pg'])
+    do_cmd(['docker', 'stop', 'redis'])
+    do_cmd(['docker', 'stop', 'beanstalkd'])
 
 
 def start_service():
-    # do_cmd(['systemctl', 'start', 'docker'])
-    pass
+    # TODO: start your services below
+    do_cmd(['docker', 'start', 'beanstalkd'])
+    do_cmd(['docker', 'start', 'redis'])
+    do_cmd(['docker', 'start', 'pg'])
+    do_cmd(['docker', 'start', 'main'])
 
 
 def compress_file(dest, src):
+    if not os.path.isabs(src):
+        raise Exception('there is no such directory:', src)
     if not os.path.exists(os.path.dirname(dest)):
         os.makedirs(os.path.dirname(dest))
     try:
         cmd = ['tar', '-zpcf', dest, '-C', src, './']
-        if os.path.isfile(find_executable('pigz')):
+        # use pigz to compress file with multi cpu.
+        if os.path.isfile(find_executable('pigz') or ''):
             cmd = ['tar', '-I', 'pigz', '-cpf', dest, '-C', src, './']
         do_cmd(cmd)
         return dest
@@ -113,14 +172,49 @@ def get_backup_list():
     return backuplist
 
 
+def get_backup_history():
+    history = load_history(HISTORY_JSON_FILE)
+    for item in history[:]:
+        if item['cmd'] != 'cmd_backup_create':
+            history.remove(item)
+    return history
+
+
 def create_snapshot(snapname, lv_path):
-    do_cmd(['lvcreate', '-L100M', '-s', '-n', snapname, lv_path])
+    do_cmd(['lvcreate', '-L2G', '-s', '-n', snapname, lv_path])
     vg_name = lv_path.split('/')[2]
     snapshot_lv_path = '/dev/{}/{}'.format(vg_name, snapname)
-    if not is_volume_active(snapshot_lv_path):
-        raise Exception('create snapshot failed')
+    if not is_snapshot_active(snapshot_lv_path):
+        remove_snapshot(snapshot_lv_path)
+        raise Exception('create snapshot failed.')
     else:
         return snapshot_lv_path
+
+
+def log(func):
+    def wrapper(*args, **kw):
+        res = {
+            'timestamp': time.strftime("%Y%m%d%H%M%S"),
+            'cmd': func.__name__,
+        }
+        error = None
+        try:
+            msg = func(*args, **kw)
+            res['code'] = 200
+            res['msg'] = str(msg)
+        except Exception, e:
+            res['code'] = 500
+            res['msg'] = str(e)
+            error = e
+        finally:
+            history = load_history(HISTORY_JSON_FILE)
+            history.append(res)
+            dump_history(history, HISTORY_JSON_FILE)
+            if error:
+                raise Exception(error)
+
+        return func
+    return wrapper
 
 
 def remove_snapshot(lv_path):
@@ -138,27 +232,63 @@ def umount_volume(lv_path):
     return do_cmd(['umount', lv_path])
 
 
-def cmd_backup_create(args):
-    snap_lv_path = create_snapshot('datasnapshot', args.lv_path)
+def backup_offline(args):
+    stop_service()
+    cur_time = time.strftime("%Y%m%d%H%M%S")
+    pg_version = get_pg_version(args.src)
+    filename = '{}/{}.tgz'.format(args.dest, cur_time)
+    compress_file(filename, args.src)
+    start_service()
 
+    backupfile = {
+        'filename': filename,
+        'create_at': cur_time,
+        'bytes': os.path.getsize(filename),
+        'version': pg_version,
+        'remark': "created offline",
+        'md5': md5_checksum(filename),
+        'operator': ""
+    }
+    return backupfile
+
+
+def backup_online(args):
+    snap_lv_path = create_snapshot('datasnapshot', args.src)
     mount_dir = '/mnt/snapshot'
     mount_volume(mount_dir, snap_lv_path)
 
     cur_time = time.strftime("%Y%m%d%H%M%S")
+    pg_version = get_pg_version(mount_dir)
     filename = '{}/{}.tgz'.format(args.dest, cur_time)
     compress_file(filename, mount_dir)
     umount_volume(snap_lv_path)
     remove_snapshot(snap_lv_path)
 
-    res = insert_backup({
+    backupfile = {
         'filename': filename,
         'create_at': cur_time,
         'bytes': os.path.getsize(filename),
-        'version': '9.5',
-        'remark': "",
+        'version': pg_version,
+        'remark': "created online",
+        'md5': md5_checksum(filename),
         'operator': ""
-    })
-    print(json.dumps(res, sort_keys=True))
+    }
+    return backupfile
+
+
+@log
+def cmd_backup_create(args):
+    backup = {}
+    if is_dir_path(args.src):
+        backup = backup_offline(args)
+    elif is_lv_path(args.src):
+        backup = backup_online(args)
+    else:
+        raise Exception('unexception argument src: ' + str(args.src))
+
+    insert_backup(backup)
+    print(json.dumps(backup, sort_keys=True))
+    return json.dumps(backup, sort_keys=True)
 
 
 def cmd_backup_delete(args):
@@ -168,6 +298,14 @@ def cmd_backup_delete(args):
 
 def cmd_backup_list(args):
     print(json.dumps(get_backup_list(), sort_keys=True))
+
+
+def cmd_backup_history(args):
+    history = get_backup_history()
+    if args.count <= 0:
+        args.count = 1
+    history = sorted(history, key=lambda item: item['timestamp'], reverse=True)
+    print(json.dumps(history[:args.count], sort_keys=True))
 
 
 def cmd_restore(args):
@@ -195,8 +333,9 @@ def main():
         'create',
         help='create a backupfile')
     parser_backup_create.add_argument(
-        'lv_path',
-        help='specify the logical volume path which needs to backup')
+        'src',
+        help='specify the source path, '
+        'it should be logical volume path or directory path.')
     parser_backup_create.add_argument(
         '--dest',
         default='/backup',
@@ -217,6 +356,18 @@ def main():
         'list',
         help='list the information of backup files')
     parser_backup_list.set_defaults(func=cmd_backup_list)
+
+    # Subcommand `backup history`
+    parser_backup_history = subparsers_backup.add_parser(
+        'history',
+        help='return the history results of backup commmand')
+    parser_backup_history.add_argument(
+        '--count',
+        default=1,
+        type=int,
+        help='Specify the number of latest history results to be listed')
+
+    parser_backup_history.set_defaults(func=cmd_backup_history)
 
     # Subcommand `restore`
     parser_restore = subparsers.add_parser(
