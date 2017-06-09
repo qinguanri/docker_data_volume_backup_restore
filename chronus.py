@@ -22,6 +22,7 @@ LOGGING_FMT = '%(module)s[%(process)d]:%(levelname)s:%(message)s'
 # Record backup meta data at a json file.
 BACKUP_JSON_FILE = '/var/local/backuplist.json'
 HISTORY_JSON_FILE = '/var/local/backuphistory.json'
+BACKUP_META_FILENAME = '.backupmetadata'
 
 
 def do_cmd(cmd, **kwargs):
@@ -44,6 +45,23 @@ def get_pg_version(dir):
             return pg_version
     else:
         return ""
+
+
+def get_meta_from_backupfile(filename):
+    if not os.path.isfile(filename) or not re.search('.+\.tgz', filename):
+        return None
+    do_cmd(['tar', 'xzf', filename, '-C', '/tmp', './' + BACKUP_META_FILENAME])
+    metadata = read_data('/tmp/' + BACKUP_META_FILENAME)
+    if not metadata or metadata == []:
+        metadata = {
+            'create_at': time.strftime("%Y%m%d%H%M%S"),
+            'version': 'unknown',
+            'remark': 'unknown',
+            'operator': '',
+        }
+    if os.path.isfile('/tmp/' + BACKUP_META_FILENAME):
+        os.remove('/tmp/' + BACKUP_META_FILENAME)
+    return metadata
 
 
 def md5_checksum(filename, block_size=64 * 1024):
@@ -76,7 +94,8 @@ def dump_backup_list(backuplist, filename):
 
 
 def load_backup_list(filename):
-    return read_data(filename)
+    backuplist = read_data(filename)
+    return unique_backup_list(backuplist)
 
 
 def dump_history(history, filename):
@@ -118,12 +137,14 @@ def start_service():
     do_cmd(['docker', 'start', 'main'])
 
 
-def compress_file(dest, src):
+def compress_file(dest, src, extendinfo):
     if not os.path.isabs(src):
         raise Exception('there is no such directory:', src)
     if not os.path.exists(os.path.dirname(dest)):
         os.makedirs(os.path.dirname(dest))
     try:
+        # add a new file into tgz to recored meta data.
+        write_data(extendinfo, src + "/" + BACKUP_META_FILENAME)
         cmd = ['tar', '-zpcf', dest, '-C', src, './']
         # use pigz to compress file with multi cpu.
         if os.path.isfile(find_executable('pigz') or ''):
@@ -163,13 +184,58 @@ def remove_backup(backup):
     return backuplist
 
 
-def get_backup_list():
+def unique_backup_list(backuplist):
+    md5list = []
+    result = []
+    for backup in backuplist:
+        if backup['md5'] not in md5list:
+            result.append(backup)
+            md5list.append(backup['md5'])
+    return result
+
+
+def get_backup_list(dir):
+    # check directory valid
+    if dir and not os.path.exists(dir):
+        return []
+
     backuplist = load_backup_list(BACKUP_JSON_FILE)
     for backup in backuplist[:]:
+        # the file has been deleted
         if not os.path.isfile(backup['filename']):
             backuplist.remove(backup)
-    dump_backup_list(backuplist, BACKUP_JSON_FILE)
-    return backuplist
+            continue
+        # the file is not in the target directory
+        if dir and os.path.dirname(backup['filename']) != dir:
+            backuplist.remove(backup)
+
+    # return all directory's backup files
+    if not dir:
+        return unique_backup_list(backuplist)
+
+    # append the backupfile which has not been recorded in json file.
+    filelist = [dir + '/' + file for file in os.listdir(dir)]
+    backuppathlist = [backup['filename'] for backup in backuplist]
+    for filename in filelist:
+        if not os.path.isfile(filename):
+            continue
+        if filename in backuppathlist:
+            continue
+        meta = get_meta_from_backupfile(filename)
+        if not meta:
+            continue
+        backup = {
+            'filename': filename,
+            'create_at': meta['create_at'],
+            'version': meta['version'],
+            'remark': meta['remark'],
+            'operator': meta['operator'],
+            'bytes': os.path.getsize(filename),
+            'md5': md5_checksum(filename)
+        }
+        insert_backup(backup)
+        backuplist.append(backup)
+    return unique_backup_list(backuplist)
 
 
 def get_backup_history():
@@ -237,18 +303,20 @@ def backup_offline(args):
     cur_time = time.strftime("%Y%m%d%H%M%S")
     pg_version = get_pg_version(args.src)
     filename = '{}/{}.tgz'.format(args.dest, cur_time)
-    compress_file(filename, args.src)
-    start_service()
-
-    backupfile = {
+    extend_info = {
         'filename': filename,
         'create_at': cur_time,
-        'bytes': os.path.getsize(filename),
         'version': pg_version,
-        'remark': "created offline",
-        'md5': md5_checksum(filename),
+        'remark': args.remark or "created offline",
         'operator': ""
     }
+
+    compress_file(filename, args.src, extend_info)
+    start_service()
+    backupfile = extend_info
+    backupfile['bytes'] = os.path.getsize(filename)
+    backupfile['md5'] = md5_checksum(filename)
+
     return backupfile
 
 
@@ -260,19 +328,21 @@ def backup_online(args):
     cur_time = time.strftime("%Y%m%d%H%M%S")
     pg_version = get_pg_version(mount_dir)
     filename = '{}/{}.tgz'.format(args.dest, cur_time)
-    compress_file(filename, mount_dir)
+    extend_info = {
+        'filename': filename,
+        'create_at': cur_time,
+        'version': pg_version,
+        'remark': args.remark or "created offline",
+        'operator': ""
+    }
+
+    compress_file(filename, mount_dir, extend_info)
     umount_volume(snap_lv_path)
     remove_snapshot(snap_lv_path)
 
-    backupfile = {
-        'filename': filename,
-        'create_at': cur_time,
-        'bytes': os.path.getsize(filename),
-        'version': pg_version,
-        'remark': "created online",
-        'md5': md5_checksum(filename),
-        'operator': ""
-    }
+    backupfile = extend_info
+    backupfile['bytes'] = os.path.getsize(filename)
+    backupfile['md5'] = md5_checksum(filename)
     return backupfile
 
 
@@ -297,7 +367,7 @@ def cmd_backup_delete(args):
 
 
 def cmd_backup_list(args):
-    print(json.dumps(get_backup_list(), sort_keys=True))
+    print(json.dumps(get_backup_list(args.dir), sort_keys=True))
 
 
 def cmd_backup_history(args):
@@ -318,6 +388,13 @@ def cmd_restore(args):
 def main():
     parser = argparse.ArgumentParser(
         description='Process backup or restore task.')
+    parser.add_argument(
+        '-v',
+        '--version',
+        action='version',
+        version="${version_info}",    # jenkins will auto set it
+        help='Show program version info and exit.')
+
     subparsers = parser.add_subparsers(
         help='sub-command help')
 
@@ -340,6 +417,10 @@ def main():
         '--dest',
         default='/backup',
         help='the directory to save the backup file')
+    parser_backup_create.add_argument(
+        '--remark',
+        default=None,
+        help='the remark content')
     parser_backup_create.set_defaults(func=cmd_backup_create)
 
     # Subcommand `backup delete`
@@ -355,6 +436,10 @@ def main():
     parser_backup_list = subparsers_backup.add_parser(
         'list',
         help='list the information of backup files')
+    parser_backup_list.add_argument(
+        '--dir',
+        default=None,
+        help='specify the directory')
     parser_backup_list.set_defaults(func=cmd_backup_list)
 
     # Subcommand `backup history`
